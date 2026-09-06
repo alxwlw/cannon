@@ -4,7 +4,7 @@ import * as viem from 'viem';
 import { z } from 'zod';
 import { ARACHNID_DEFAULT_DEPLOY_ADDR, ensureArachnidCreate2Exists, makeArachnidCreate2Txn } from '../create2';
 import { mergeTemplateAccesses } from '../access-recorder';
-import { sendTransactionWithRetry } from '../helpers';
+import { parseGasLimit } from '../broadcast';
 import { ChainBuilderRuntime } from '../runtime';
 import { diamondSchema } from '../schemas';
 import { ContractArtifact, ContractMap, PackageState } from '../types';
@@ -202,28 +202,22 @@ const diamondStep = {
 
     // todo: what to do about the owner of the proxy changing unexpectedly?
     try {
-      const txn = await sendTransactionWithRetry(ownerSigner, async () => {
-        const preparedTxn = await runtime.provider.prepareTransactionRequest({
-          account: ownerSigner.wallet.account || ownerSigner.address,
-          to: proxyAddress,
-          data: viem.encodeFunctionData({
-            abi: (await import('../abis/diamond/DiamondWipeAndPaveFacet.json')).abi,
-            functionName: 'diamondWipeAndPave',
-            args: [updateFacets, config.diamondArgs.init, config.diamondArgs.initCalldata],
-          }),
-          ...config.overrides,
-        } as any);
-        return ownerSigner.wallet.sendTransaction(preparedTxn as any);
+      const receipt = await runtime.sendTransaction(ownerSigner, {
+        to: proxyAddress,
+        data: viem.encodeFunctionData({
+          abi: (await import('../abis/diamond/DiamondWipeAndPaveFacet.json')).abi,
+          functionName: 'diamondWipeAndPave',
+          args: [updateFacets, config.diamondArgs.init, config.diamondArgs.initCalldata],
+        }),
+        gas: parseGasLimit(config.overrides?.gasLimit),
       });
-
-      const receipt = await runtime.provider.waitForTransactionReceipt({ hash: txn });
       debug('got receipt', receipt);
 
       return {
         contracts: outputContracts,
         txns: {
           [`${stepName}_diamondCut`]: {
-            hash: txn,
+            hash: receipt.transactionHash,
             events: {},
             deployedOn: packageState.currentLabel,
             gasUsed: Number(receipt.gasUsed),
@@ -275,42 +269,30 @@ async function firstTimeDeploy(
       source: contract.source,
     });
 
-    const preparedTxn = await signer.wallet.prepareTransactionRequest({
-      account: signer.wallet.account || signer.address!,
-      data: encodeDeployData({
-        abi: contract.abi,
-        bytecode: contract.bytecode as viem.Hash,
-        args: constructorArgs,
-      }),
+    const deployData = encodeDeployData({
+      abi: contract.abi,
+      bytecode: contract.bytecode as viem.Hash,
+      args: constructorArgs,
+    });
+
+    // pre-flight the plain deployment so a reverting constructor surfaces with its reason;
+    // the arachnid proxy would swallow it
+    await signer.wallet.prepareTransactionRequest({
+      account: signer.wallet.account || signer.address,
+      data: deployData,
       chain: undefined,
     });
 
-    if (config.overrides?.gasLimit) {
-      preparedTxn.gas = BigInt(config.overrides.gasLimit);
-    }
-
-    if (runtime.gasPrice) {
-      preparedTxn.gasPrice = runtime.gasPrice;
-    }
-
-    if (runtime.gasFee) {
-      preparedTxn.maxFeePerGas = runtime.gasFee;
-    }
-
-    if (runtime.priorityGasFee) {
-      preparedTxn.maxPriorityFeePerGas = runtime.priorityGasFee;
-    }
-
-    const [create2Txn, addr] = makeArachnidCreate2Txn(salt, preparedTxn.data!, arachnidDeployerAddress);
+    const [create2Txn, addr] = makeArachnidCreate2Txn(salt, deployData, arachnidDeployerAddress);
     debug(`create2: deploy ${addr} by ${arachnidDeployerAddress}`);
 
     const bytecode = await runtime.provider.getCode({ address: addr });
 
     if (!bytecode) {
-      const hash = await sendTransactionWithRetry(signer, async () =>
-        signer.wallet.sendTransaction(_.assign({ account: signer.wallet.account || signer.address }, create2Txn as any))
-      );
-      const receipt = await runtime.provider.waitForTransactionReceipt({ hash });
+      const receipt = await runtime.sendTransaction(signer, {
+        ...create2Txn,
+        gas: parseGasLimit(config.overrides?.gasLimit),
+      });
       const block = await runtime.provider.getBlock({ blockHash: receipt.blockHash });
       outputContracts[deployedContractLabel] = {
         address: addr,

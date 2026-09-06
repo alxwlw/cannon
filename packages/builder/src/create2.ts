@@ -1,7 +1,7 @@
 import Debug from 'debug';
 import * as viem from 'viem';
 import { CannonSigner, ChainBuilderRuntimeInfo } from './';
-import { sendTransactionWithRetry } from './helpers';
+import { broadcastTransaction } from './broadcast';
 
 const debug = Debug('cannon:builder:create2');
 
@@ -41,15 +41,12 @@ export async function ensureArachnidCreate2Exists(
     }
 
     // now run the presigned deployment txn
-    const hash = await sendTransactionWithRetry(signer, async () =>
-      signer.wallet.sendTransaction({
-        account: signer.address,
-        chain: runtime.provider.chain,
+    await broadcastTransaction(
+      { signer, provider: runtime.provider, policy: runtime.broadcastPolicy },
+      {
         data: '0x604580600e600039806000f350fe7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3',
-      })
+      }
     );
-
-    await runtime.provider.waitForTransactionReceipt({ hash });
   }
 
   return proxyAddress;
