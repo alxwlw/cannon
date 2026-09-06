@@ -120,10 +120,11 @@ function toSignParameters(
 }
 
 // Sends one transaction through the single live-broadcast path of the builder and resolves with its
-// receipt. Local accounts (private-key signers) are signed here so that a retry re-broadcasts the same
-// nonce; json-rpc accounts (Frame, anvil impersonation) are sent through the wallet and retried as-is.
-// Deterministic failures (reverts) fail identically on each attempt and surface the last error. An
-// explicit user rejection (EIP-1193 code 4001) is never retried.
+// receipt. Local accounts (private-key signers) are signed here so that a retry re-broadcasts the exact
+// same nonce; json-rpc accounts (Frame, anvil impersonation) are sent through the wallet and retried as-is
+// — see the caveat on broadcastViaWallet below, which still applies only to that path. Deterministic
+// failures (reverts) fail identically on each attempt and surface the last error. An explicit user
+// rejection (EIP-1193 code 4001) is never retried.
 export async function broadcastTransaction(
   ctx: BroadcastContext,
   request: BroadcastRequest
@@ -137,14 +138,15 @@ export async function broadcastTransaction(
   return ctx.provider.waitForTransactionReceipt({ hash });
 }
 
-// Local accounts: prepare on the provider, take the nonce once, sign, and broadcast the raw
-// transaction. Before every retry the node is asked whether one of the variants signed for this nonce
-// is already known (the RPC may have accepted it and lost the reply); if so, that hash is awaited
-// instead of re-sending. Otherwise the request is re-prepared (fresh gas and fees) and re-signed with
-// the same nonce. One nonce per logical send means at most one variant can ever execute — a retry can
-// neither double-execute a step nor leave a nonce gap behind. If the nonce was taken by someone else
-// meanwhile, every attempt fails with the node's nonce error and the build stops; the next build reads
-// a fresh nonce.
+// Local accounts: sign and broadcast the raw transaction locally. Every attempt re-prepares on the
+// provider (fresh gas and fees), but the nonce is taken from the account's nonce manager exactly once —
+// on whichever attempt first prepares successfully — and reused unchanged after that, so a prepare
+// failure never consumes a nonce. Before every retry the node is asked whether one of the variants signed
+// for this nonce is already known (the RPC may have accepted it and lost the reply); if so, that hash is
+// awaited instead of re-sending. One nonce per logical send means at most one variant can ever execute —
+// a retry can neither double-execute a step nor leave a nonce gap behind. If the nonce was taken by
+// someone else meanwhile, every attempt fails with the node's nonce error and the build stops; the next
+// build reads a fresh nonce.
 async function broadcastSigned(
   ctx: BroadcastContext,
   request: BroadcastRequest,
@@ -153,31 +155,36 @@ async function broadcastSigned(
   const { signer, provider } = ctx;
   const policy = ctx.policy ?? DEFAULT_BROADCAST_POLICY;
   const maxAttempts = policy.retries + 1;
-  const prepare = () => provider.prepareTransactionRequest(toPrepareParameters(request, account, provider.chain));
 
-  const first = await prepare();
-  const chainId = first.chainId ?? (await provider.getChainId());
-  const nonce = account.nonceManager
-    ? await account.nonceManager.consume({ address: account.address, chainId, client: provider })
-    : await provider.getTransactionCount({ address: account.address, blockTag: 'pending' });
-
+  let nonce: number | undefined;
   const signedHashes: viem.Hash[] = [];
 
   return promiseRetry(
     { retries: policy.retries, minTimeout: policy.minTimeout, factor: policy.factor },
     async (retry, attempt) => {
-      const prepared = attempt === 1 ? first : await prepare();
-      const serialized = await signer.wallet.signTransaction(
-        toSignParameters(prepared, nonce, account, signer.wallet.chain)
-      );
-      const hash = viem.keccak256(serialized);
-      signedHashes.push(hash);
-
       try {
+        // prepared fresh on every attempt: a retry picks up current gas and fees
+        const prepared = await provider.prepareTransactionRequest(toPrepareParameters(request, account, provider.chain));
+
+        // the nonce is taken once per logical send and reused by every later attempt, so at most one of
+        // the signed variants can ever execute
+        if (nonce === undefined) {
+          const chainId = prepared.chainId ?? (await provider.getChainId());
+          nonce = account.nonceManager
+            ? await account.nonceManager.consume({ address: account.address, chainId, client: provider })
+            : await provider.getTransactionCount({ address: account.address, blockTag: 'pending' });
+        }
+
+        const serialized = await signer.wallet.signTransaction(
+          toSignParameters(prepared, nonce, account, signer.wallet.chain)
+        );
+        const hash = viem.keccak256(serialized);
+        signedHashes.push(hash);
+
         await provider.sendRawTransaction({ serializedTransaction: serialized });
         return hash;
       } catch (err) {
-        debug(`broadcast attempt ${attempt}/${maxAttempts} failed (nonce ${nonce}):`, err);
+        debug(`broadcast attempt ${attempt}/${maxAttempts} failed${nonce === undefined ? '' : ` (nonce ${nonce})`}:`, err);
 
         const known = await findKnownTransaction(provider, signedHashes);
         if (known) {
@@ -192,7 +199,11 @@ async function broadcastSigned(
   );
 }
 
-// json-rpc accounts: the node assigns the nonce on every send, so a retry simply sends again.
+// json-rpc accounts: the node assigns the nonce on every send, so a retry simply prepares and sends
+// again. Caveat: if an earlier attempt actually reached the node before failing locally (a lost response,
+// a timeout), the wallet can prompt the signer a second time and the node can end up with two accepted
+// transactions at different nonces for the same logical send — unlike the local-account path above,
+// retries here are not idempotent.
 async function broadcastViaWallet(
   ctx: BroadcastContext,
   request: BroadcastRequest,

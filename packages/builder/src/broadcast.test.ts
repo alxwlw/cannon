@@ -20,6 +20,7 @@ type Harness = {
   calls: Record<string, number>;
   sendErrors: Error[];
   lookupErrors: Error[];
+  prepareErrors: Error[];
   consume: jest.Mock;
   signedNonces: () => number[];
   signedTxns: () => viem.TransactionSerializableGeneric[];
@@ -33,6 +34,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
   const calls: Record<string, number> = {};
   const sendErrors: Error[] = [];
   const lookupErrors: Error[] = [];
+  const prepareErrors: Error[] = [];
   const receipts: viem.Hash[] = [];
   const rawSends: viem.Hex[] = [];
   const known = new Set<viem.Hash>();
@@ -117,11 +119,18 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
 
   const wallet = viem.createWalletClient({ account: opts.jsonRpcAccount ? TARGET : account, chain: CHAIN, transport });
 
-  const provider = viem.createPublicClient({ chain: CHAIN, transport }).extend(() => ({
+  const provider = viem.createPublicClient({ chain: CHAIN, transport }).extend((client) => ({
     waitForTransactionReceipt: async ({ hash }: { hash: viem.Hash }) => {
       receipts.push(hash);
       return { transactionHash: hash, status: 'success' } as viem.TransactionReceipt;
     },
+    // shifts an injected failure before delegating to the real prepare, so tests still exercise viem's
+    // actual prepareTransactionRequest path (fee/gas estimation) rather than a stubbed-out replacement
+    prepareTransactionRequest: (async (args: Parameters<typeof client.prepareTransactionRequest>[0]) => {
+      const err = prepareErrors.shift();
+      if (err) throw err;
+      return client.prepareTransactionRequest(args);
+    }) as typeof client.prepareTransactionRequest,
   }));
 
   return {
@@ -130,6 +139,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
     calls,
     sendErrors,
     lookupErrors,
+    prepareErrors,
     consume,
     signedNonces: () => signTransaction.mock.calls.map(([tx]) => Number(tx.nonce)),
     signedTxns: () => signTransaction.mock.calls.map(([tx]) => tx as viem.TransactionSerializableGeneric),
@@ -229,6 +239,57 @@ describe('broadcast.ts', () => {
       expect(first.maxPriorityFeePerGas).toBe(BigInt(1));
       expect(second.maxPriorityFeePerGas).toBe(BigInt(5));
       expect(h.rawSends[0]).not.toBe(h.rawSends[1]);
+    });
+
+    it('retries a rejecting prepare on the first attempt and still consumes the nonce once', async () => {
+      const h = makeHarness();
+      h.prepareErrors.push(new Error('fee estimation blip'));
+      const onRetry = jest.fn();
+
+      const receipt = await broadcastTransaction(
+        { signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry },
+        request
+      );
+
+      expect(receipt.transactionHash).toBe(viem.keccak256(h.rawSends[0]));
+      expect(h.rawSends).toHaveLength(1);
+      expect(h.consume).toHaveBeenCalledTimes(1);
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onRetry).toHaveBeenCalledWith(1, 4, expect.any(Error));
+    });
+
+    it('never consumes a nonce when prepare never succeeds', async () => {
+      const h = makeHarness();
+      h.prepareErrors.push(new Error('first'), new Error('second'), new Error('third'), new Error('fourth'));
+      const onRetry = jest.fn();
+
+      await expect(
+        broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry }, request)
+      ).rejects.toThrow('fourth');
+
+      // a prepare that never succeeds never reaches the point where a nonce would be consumed
+      expect(h.consume).not.toHaveBeenCalled();
+      expect(h.rawSends).toHaveLength(0);
+      expect(onRetry).toHaveBeenCalledTimes(3);
+    });
+
+    it('re-enters the loop and succeeds with the same nonce when prepare fails after a failed send', async () => {
+      const h = makeHarness();
+      h.sendErrors.push(new Error('rpc glitch'));
+      const onRetry = jest.fn();
+
+      const pending = broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry }, request);
+      // attempt 1's prepare call has already run synchronously by this point (it shifted an empty
+      // prepareErrors queue and succeeded); queuing the failure now lands it on attempt 2's prepare
+      // instead, after attempt 1's send has already failed and consumed the nonce
+      h.prepareErrors.push(new Error('fee estimation blip'));
+      const receipt = await pending;
+
+      expect(receipt.transactionHash).toBe(viem.keccak256(h.rawSends[h.rawSends.length - 1]));
+      expect(h.rawSends).toHaveLength(2);
+      expect(h.consume).toHaveBeenCalledTimes(1);
+      expect(h.signedNonces()).toEqual([5, 5]);
+      expect(onRetry).toHaveBeenCalledTimes(2);
     });
 
     it('does not re-send when the failed transaction is already known to the node', async () => {
@@ -333,6 +394,10 @@ describe('broadcast.ts', () => {
       expect(signed.maxFeePerGas).toBe(BigInt(77));
       expect(signed.maxPriorityFeePerGas).toBe(BigInt(7));
       expect(h.calls.eth_estimateGas).toBeUndefined();
+      expect(signed.to).toBe(TARGET);
+      expect(signed.data).toBe('0x');
+      expect(signed.value).toBe(BigInt(0));
+      expect(signed.chainId).toBe(CHAIN.id);
     });
 
     it('sends a legacy transaction when gasPrice is given', async () => {
