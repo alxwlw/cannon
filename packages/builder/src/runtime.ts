@@ -30,7 +30,7 @@ export enum Events {
   ResolveDeploy = 'resolve-deploy',
   DownloadDeploy = 'download-deploy',
   Notice = 'notice', // used when there is some warning from the build output
-  BroadcastRetry = 'broadcast-retry', // attempt, max attempts, error
+  BroadcastRetry = 'broadcast-retry', // attempt, max attempts, error, depth
 }
 
 export class CannonStorage extends EventEmitter {
@@ -210,7 +210,8 @@ export class ChainBuilderRuntime extends CannonStorage implements ChainBuilderRu
     return this._priorityGasFee;
   }
 
-  // Single entry point for every live transaction sent by a step: applies the gas settings of this
+  // Entry point for the transactions the step implementations send themselves (create2 bootstrap and
+  // the on-chain upgrade record call the pipeline directly): applies the gas settings of this
   // runtime, then broadcasts through the retrying pipeline and reports retries as BroadcastRetry events.
   async sendTransaction(signer: CannonSigner, request: BroadcastRequestBase): Promise<viem.TransactionReceipt> {
     // the constructor drops gasPrice when gasFee is set, so at most one fee model is active

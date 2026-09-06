@@ -41,27 +41,22 @@ export type BroadcastContext = {
   onRetry?: (attempt: number, maxAttempts: number, err: unknown) => void;
 };
 
-// everything viem fills in by default except the nonce, which is assigned at send time so that a
-// local account's nonce manager is consulted right before signing (see resetSignerNonce)
+// everything viem fills in by default except the nonce: leaving it out of the provider-side prepare
+// means `wallet.sendTransaction` assigns it through the account's nonce manager right before signing.
+// The manager re-reads the pending count on every send and never hands out a nonce lower than the
+// last one it issued (its nonceMap floor), so a retry always signs with the next nonce and a stale
+// replica answering an already-used count is harmless. Limitation: if the earlier attempt never
+// actually reached the mempool, the retry still advances past it, leaving a nonce gap behind — see
+// the doc comment on broadcastTransaction below.
 const PREPARE_PARAMETERS: viem.PrepareTransactionRequestParameterType[] = ['chainId', 'fees', 'gas', 'type'];
 
 // cannonfile `overrides.gasLimit` is a decimal string; viem expects `gas` as a bigint
 export function parseGasLimit(gasLimit: string | undefined): bigint | undefined {
-  return gasLimit ? BigInt(gasLimit) : undefined;
-}
-
-// Resets the signer's viem nonce manager (when it has one) so the next send re-reads the pending
-// nonce from the chain without ever regressing below a nonce it already handed out. Live private-key
-// signers created by the CLI carry a manager; JSON-RPC backed signers (anvil impersonation, Frame)
-// do not — the node assigns their nonces on every send. Returns whether a reset happened.
-async function resetSignerNonce(signer: CannonSigner): Promise<boolean> {
-  const account = signer.wallet.account;
-  if (account?.type !== 'local' || !account.nonceManager) return false;
-
-  // the manager is keyed by (address, chainId); resolve the chain id the way viem does at consume time
-  const chainId = signer.wallet.chain?.id ?? (await signer.wallet.getChainId());
-  account.nonceManager.reset({ address: account.address, chainId });
-  return true;
+  if (!gasLimit) return undefined;
+  if (!/^\d+$/.test(gasLimit)) {
+    throw new Error(`overrides.gasLimit must be a non-negative integer string, got "${gasLimit}"`);
+  }
+  return BigInt(gasLimit);
 }
 
 // viem types the request as a discriminated union on the fee model, so the fee fields are attached
@@ -99,12 +94,21 @@ function isUserRejection(err: unknown): boolean {
 }
 
 // Sends one transaction through the single live-broadcast path of the builder: prepare everything but
-// the nonce on the provider, hand the request to the signer's wallet (which assigns the nonce), and
-// retry any failure with backoff. There is no reliable error shape for nonce problems across RPC
-// providers, so every failure is treated as a possibly broken nonce: the signer's nonce manager is
-// reset before the retry. Deterministic failures (reverts) fail identically on each attempt and surface
-// the last error. The one exception is an explicit user rejection (EIP-1193 code 4001), which is never
-// retried. Resolves with the receipt once the transaction is mined.
+// the nonce on the provider, hand the request to the signer's wallet, and retry any failure with
+// backoff. The nonce is intentionally left out of the prepare so viem assigns it through the account's
+// nonce manager right before signing (see the comment above PREPARE_PARAMETERS): the manager re-reads
+// the pending count on every send and never regresses below the last nonce it issued, so a retry
+// always signs the next nonce even if the RPC keeps answering a stale, already-used count.
+// Deterministic failures (reverts) fail identically on each attempt and surface the last error. The
+// one exception is an explicit user rejection (EIP-1193 code 4001), which is never retried.
+//
+// Known limitation: "always retry" assumes the failed attempt reached the mempool (or the RPC replica
+// was merely stale). If it did not — e.g. a fee below the current base fee, or an RPC 429/5xx after
+// viem's own transport retries are exhausted — the retry still signs the next nonce, leaving a gap
+// behind it. `waitForTransactionReceipt` then times out (viem's default is 180s), and the earlier,
+// never-broadcast transaction only executes on a later `cannon build` once a fresh nonce manager
+// reuses the gapped nonce — a delayed second execution of that step. `--broadcast-retries 0` opts out
+// of retrying altogether. Resolves with the receipt once the transaction is mined.
 export async function broadcastTransaction(
   ctx: BroadcastContext,
   request: BroadcastRequest
@@ -123,13 +127,7 @@ export async function broadcastTransaction(
       } catch (err) {
         if (isUserRejection(err)) throw err;
 
-        try {
-          const didReset = await resetSignerNonce(signer);
-          debug(`broadcast attempt ${attempt}/${maxAttempts} failed${didReset ? ' (nonce manager reset)' : ''}:`, err);
-        } catch (resetErr) {
-          // a failed reset must not mask the broadcast error; the retried send will report it
-          debug('could not reset nonce manager before retry:', resetErr);
-        }
+        debug(`broadcast attempt ${attempt}/${maxAttempts} failed:`, err);
 
         if (attempt < maxAttempts) ctx.onRetry?.(attempt, maxAttempts, err);
         return retry(err);

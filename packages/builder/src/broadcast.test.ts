@@ -20,7 +20,6 @@ type Harness = {
   calls: Record<string, number>;
   sendErrors: Error[];
   consume: jest.Mock;
-  reset: jest.Mock;
   signedNonces: () => number[];
   signedTxns: () => viem.TransactionSerializableGeneric[];
   receipts: viem.Hash[];
@@ -70,8 +69,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
 
   const manager = createNonceManager({ source: jsonRpc() });
   const consume = jest.fn((args: Parameters<viem.NonceManager['consume']>[0]) => manager.consume(args));
-  const reset = jest.fn((args: Parameters<viem.NonceManager['reset']>[0]) => manager.reset(args));
-  const account = privateKeyToAccount(PRIVATE_KEY, { nonceManager: { ...manager, consume, reset } });
+  const account = privateKeyToAccount(PRIVATE_KEY, { nonceManager: { ...manager, consume } });
   const signTransaction = jest.spyOn(account, 'signTransaction');
 
   const wallet = viem.createWalletClient({ account: opts.jsonRpcAccount ? TARGET : account, chain: CHAIN, transport });
@@ -89,7 +87,6 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
     calls,
     sendErrors,
     consume,
-    reset,
     signedNonces: () => signTransaction.mock.calls.map(([tx]) => Number(tx.nonce)),
     signedTxns: () => signTransaction.mock.calls.map(([tx]) => tx as viem.TransactionSerializableGeneric),
     receipts,
@@ -105,6 +102,14 @@ describe('broadcast.ts', () => {
 
     it('parses a decimal gas limit string', () => {
       expect(parseGasLimit('3000000')).toBe(BigInt(3000000));
+    });
+
+    it('rejects a non-integer gas limit string', () => {
+      expect(() => parseGasLimit('1e6')).toThrow(/gasLimit/);
+    });
+
+    it('rejects a negative gas limit string', () => {
+      expect(() => parseGasLimit('-5')).toThrow(/gasLimit/);
     });
   });
 
@@ -130,37 +135,22 @@ describe('broadcast.ts', () => {
       expect(h.calls.eth_sendRawTransaction).toBe(1);
     });
 
-    it('resets the nonce manager and re-sends with the next nonce after a failed broadcast', async () => {
+    // Two readings this protects against: (1) the RPC is a stale/lagging replica and the transaction
+    // actually landed — the manager's nonceMap floor stops the retry from regressing onto the same,
+    // already-used nonce; (2) the attempt never reached the mempool at all (e.g. fee below base fee,
+    // RPC 429/5xx) — the retry still advances past it onto nonce 6, which is correct for case (1) but
+    // leaves a gap behind case (2)'s never-broadcast nonce 5, a documented limitation (see the doc
+    // comment on broadcastTransaction).
+    it('re-sends with the next nonce after a failed broadcast even though the RPC still reports the old count', async () => {
       const h = makeHarness();
       h.sendErrors.push(new Error('rpc glitch'));
       const onRetry = jest.fn();
 
       await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry }, request);
 
-      expect(h.reset).toHaveBeenCalledTimes(1);
       expect(h.consume).toHaveBeenCalledTimes(2);
       // the RPC still answers 5, but the manager never regresses below the nonce it already handed out
       expect(h.signedNonces()).toEqual([5, 6]);
-      expect(h.calls.eth_sendRawTransaction).toBe(2);
-      expect(onRetry).toHaveBeenCalledTimes(1);
-      expect(onRetry).toHaveBeenCalledWith(1, 4, expect.any(Error));
-    });
-
-    it('still retries when resetting the nonce manager itself fails', async () => {
-      const h = makeHarness();
-      h.sendErrors.push(new Error('rpc glitch'));
-      h.reset.mockImplementationOnce(() => {
-        throw new Error('reset blew up');
-      });
-      const onRetry = jest.fn();
-
-      const receipt = await broadcastTransaction(
-        { signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry },
-        request
-      );
-
-      expect(receipt.transactionHash).toBe(TX_HASH);
-      expect(h.reset).toHaveBeenCalledTimes(1);
       expect(h.calls.eth_sendRawTransaction).toBe(2);
       expect(onRetry).toHaveBeenCalledTimes(1);
       expect(onRetry).toHaveBeenCalledWith(1, 4, expect.any(Error));
@@ -191,7 +181,6 @@ describe('broadcast.ts', () => {
       ).rejects.toThrow('User rejected the request');
 
       expect(h.calls.eth_sendRawTransaction).toBe(1);
-      expect(h.reset).not.toHaveBeenCalled();
     });
 
     it('surfaces the last error once retries are exhausted', async () => {
@@ -208,7 +197,7 @@ describe('broadcast.ts', () => {
       expect(h.receipts).toEqual([]);
     });
 
-    it('retries json-rpc backed signers, which have no nonce manager to reset', async () => {
+    it('retries json-rpc backed signers, which have no nonce manager', async () => {
       const h = makeHarness({ jsonRpcAccount: true });
       h.sendErrors.push(new Error('rpc glitch'));
 
@@ -217,7 +206,6 @@ describe('broadcast.ts', () => {
       expect(receipt.transactionHash).toBe(TX_HASH);
       expect(h.calls.eth_sendTransaction).toBe(2);
       expect(h.calls.eth_sendRawTransaction).toBeUndefined();
-      expect(h.reset).not.toHaveBeenCalled();
     });
 
     it('passes explicit gas and EIP-1559 fees through to the signed transaction', async () => {
