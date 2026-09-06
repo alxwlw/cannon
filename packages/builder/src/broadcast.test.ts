@@ -19,21 +19,29 @@ type Harness = {
   provider: viem.PublicClient;
   calls: Record<string, number>;
   sendErrors: Error[];
+  lookupErrors: Error[];
   consume: jest.Mock;
   signedNonces: () => number[];
   signedTxns: () => viem.TransactionSerializableGeneric[];
   receipts: viem.Hash[];
+  rawSends: viem.Hex[];
+  known: Set<viem.Hash>;
+  setPriorityFee: (hex: viem.Hex) => void;
 };
 
 function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
   const calls: Record<string, number> = {};
   const sendErrors: Error[] = [];
+  const lookupErrors: Error[] = [];
   const receipts: viem.Hash[] = [];
+  const rawSends: viem.Hex[] = [];
+  const known = new Set<viem.Hash>();
+  let priorityFee: viem.Hex = '0x1';
 
   // retryCount: 0 — viem's transport-level retry would otherwise swallow the injected failures
   const transport = viem.custom(
     {
-      async request({ method }: { method: string }) {
+      async request({ method, params }: { method: string; params?: unknown[] }) {
         calls[method] = (calls[method] ?? 0) + 1;
         switch (method) {
           case 'eth_chainId':
@@ -52,12 +60,47 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
               transactions: [],
             };
           case 'eth_maxPriorityFeePerGas':
-            return '0x1';
-          case 'eth_sendRawTransaction':
+            return priorityFee;
+          case 'eth_sendRawTransaction': {
+            const [raw] = params as [viem.Hex];
+            rawSends.push(raw);
+            const err = sendErrors.shift();
+            if (err) {
+              // 'socket hang up' models a node that accepted the transaction but whose reply was lost
+              if (err.message === 'socket hang up') known.add(viem.keccak256(raw));
+              throw err;
+            }
+            return viem.keccak256(raw);
+          }
           case 'eth_sendTransaction': {
             const err = sendErrors.shift();
             if (err) throw err;
             return TX_HASH;
+          }
+          case 'eth_getTransactionByHash': {
+            const [hash] = params as [viem.Hash];
+            const lookupErr = lookupErrors.shift();
+            if (lookupErr) throw lookupErr;
+            if (!known.has(hash)) return null;
+            return {
+              hash,
+              nonce: STALE_NONCE,
+              from: TARGET,
+              to: TARGET,
+              value: '0x0',
+              gas: '0x5208',
+              input: '0x',
+              blockHash: null,
+              blockNumber: null,
+              transactionIndex: null,
+              type: '0x2',
+              chainId: viem.numberToHex(CHAIN.id),
+              maxFeePerGas: '0x1',
+              maxPriorityFeePerGas: '0x1',
+              v: '0x0',
+              r: '0x0',
+              s: '0x0',
+            };
           }
           default:
             throw new Error(`unexpected rpc method ${method}`);
@@ -86,10 +129,16 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
     provider,
     calls,
     sendErrors,
+    lookupErrors,
     consume,
     signedNonces: () => signTransaction.mock.calls.map(([tx]) => Number(tx.nonce)),
     signedTxns: () => signTransaction.mock.calls.map(([tx]) => tx as viem.TransactionSerializableGeneric),
     receipts,
+    rawSends,
+    known,
+    setPriorityFee: (hex) => {
+      priorityFee = hex;
+    },
   };
 }
 
@@ -121,39 +170,99 @@ describe('broadcast.ts', () => {
       expect(DEFAULT_BROADCAST_POLICY).toEqual({ retries: 3, minTimeout: 250, factor: 2 });
     });
 
-    it('assigns the nonce through the account nonce manager at send time', async () => {
+    it('signs locally, consumes the nonce once and awaits the receipt by the raw transaction hash', async () => {
       const h = makeHarness();
 
       const receipt = await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
 
-      expect(receipt.transactionHash).toBe(TX_HASH);
-      expect(h.receipts).toEqual([TX_HASH]);
+      expect(h.rawSends).toHaveLength(1);
+      expect(receipt.transactionHash).toBe(viem.keccak256(h.rawSends[0]));
+      expect(h.receipts).toEqual([viem.keccak256(h.rawSends[0])]);
       expect(h.consume).toHaveBeenCalledTimes(1);
       // the only pending-nonce read belongs to the manager; prepareTransactionRequest must not fetch one itself
       expect(h.calls.eth_getTransactionCount).toBe(1);
       expect(h.signedNonces()).toEqual([5]);
-      expect(h.calls.eth_sendRawTransaction).toBe(1);
+      expect(h.calls.eth_sendTransaction).toBeUndefined();
     });
 
-    // Two readings this protects against: (1) the RPC is a stale/lagging replica and the transaction
-    // actually landed — the manager's nonceMap floor stops the retry from regressing onto the same,
-    // already-used nonce; (2) the attempt never reached the mempool at all (e.g. fee below base fee,
-    // RPC 429/5xx) — the retry still advances past it onto nonce 6, which is correct for case (1) but
-    // leaves a gap behind case (2)'s never-broadcast nonce 5, a documented limitation (see the doc
-    // comment on broadcastTransaction).
-    it('re-sends with the next nonce after a failed broadcast even though the RPC still reports the old count', async () => {
+    it('takes consecutive nonces across sends even though the RPC keeps answering the stale count', async () => {
+      const h = makeHarness();
+
+      await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+      await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+
+      // the manager never hands out a nonce below the last one it issued, so a lagging replica is harmless
+      expect(h.signedNonces()).toEqual([5, 6]);
+      expect(h.calls.eth_getTransactionCount).toBe(2);
+    });
+
+    it('re-sends with the same nonce after a failed broadcast', async () => {
       const h = makeHarness();
       h.sendErrors.push(new Error('rpc glitch'));
       const onRetry = jest.fn();
 
       await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry }, request);
 
-      expect(h.consume).toHaveBeenCalledTimes(2);
-      // the RPC still answers 5, but the manager never regresses below the nonce it already handed out
-      expect(h.signedNonces()).toEqual([5, 6]);
-      expect(h.calls.eth_sendRawTransaction).toBe(2);
+      // one logical send = one nonce, however many attempts it takes: no gap, no second execution
+      expect(h.consume).toHaveBeenCalledTimes(1);
+      expect(h.signedNonces()).toEqual([5, 5]);
+      expect(h.rawSends).toHaveLength(2);
+      expect(h.calls.eth_getTransactionByHash).toBe(1);
       expect(onRetry).toHaveBeenCalledTimes(1);
       expect(onRetry).toHaveBeenCalledWith(1, 4, expect.any(Error));
+    });
+
+    it('re-signs with fresh fees but the same nonce when the first attempt was rejected', async () => {
+      const h = makeHarness();
+      h.sendErrors.push(new Error('max fee per gas less than block base fee'));
+
+      const pending = broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+      // let the first attempt's fee fetch (a microtask chain through the mock transport) settle before
+      // changing the fee, otherwise the mutation would race ahead of it and both attempts would see '0x5'
+      await new Promise((resolve) => setImmediate(resolve));
+      h.setPriorityFee('0x5');
+      await pending;
+
+      const [first, second] = h.signedTxns();
+      expect(first.nonce).toBe(5);
+      expect(second.nonce).toBe(5);
+      expect(first.maxPriorityFeePerGas).toBe(BigInt(1));
+      expect(second.maxPriorityFeePerGas).toBe(BigInt(5));
+      expect(h.rawSends[0]).not.toBe(h.rawSends[1]);
+    });
+
+    it('does not re-send when the failed transaction is already known to the node', async () => {
+      const h = makeHarness();
+      const onRetry = jest.fn();
+      // the node accepted the transaction but the RPC reply was lost: the transport marks the raw
+      // transaction as known before throwing (see the 'socket hang up' branch in makeHarness)
+      h.sendErrors.push(new Error('socket hang up'));
+
+      const receipt = await broadcastTransaction(
+        { signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry },
+        request
+      );
+
+      expect(h.rawSends).toHaveLength(1);
+      expect(receipt.transactionHash).toBe(viem.keccak256(h.rawSends[0]));
+      expect(h.receipts).toEqual([viem.keccak256(h.rawSends[0])]);
+      expect(h.calls.eth_getTransactionByHash).toBe(1);
+      expect(onRetry).not.toHaveBeenCalled();
+    });
+
+    it('treats a transaction lookup failure as unknown and retries', async () => {
+      const h = makeHarness();
+      h.sendErrors.push(new Error('rpc glitch'));
+      h.lookupErrors.push(new Error('rpc down'));
+      const onRetry = jest.fn();
+
+      await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry }, request);
+
+      // the lookup itself failed (not a "not found"), so it must not be mistaken for "known": the
+      // pipeline still retries instead of silently stalling
+      expect(h.calls.eth_getTransactionByHash).toBe(1);
+      expect(h.rawSends).toHaveLength(2);
+      expect(onRetry).toHaveBeenCalledTimes(1);
     });
 
     it('sends exactly once when retries is 0', async () => {
@@ -168,22 +277,12 @@ describe('broadcast.ts', () => {
         )
       ).rejects.toThrow('rpc glitch');
 
-      expect(h.calls.eth_sendRawTransaction).toBe(1);
+      expect(h.rawSends).toHaveLength(1);
+      expect(h.calls.eth_getTransactionByHash).toBe(1);
       expect(onRetry).not.toHaveBeenCalled();
     });
 
-    it('does not retry when the user rejected the request', async () => {
-      const h = makeHarness();
-      h.sendErrors.push(new viem.UserRejectedRequestError(new Error('user said no')));
-
-      await expect(
-        broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request)
-      ).rejects.toThrow('User rejected the request');
-
-      expect(h.calls.eth_sendRawTransaction).toBe(1);
-    });
-
-    it('surfaces the last error once retries are exhausted', async () => {
+    it('surfaces the last error without advancing the nonce once retries are exhausted', async () => {
       const h = makeHarness();
       h.sendErrors.push(new Error('first'), new Error('second'), new Error('third'), new Error('fourth'));
       const onRetry = jest.fn();
@@ -192,9 +291,22 @@ describe('broadcast.ts', () => {
         broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry }, request)
       ).rejects.toThrow('fourth');
 
-      expect(h.calls.eth_sendRawTransaction).toBe(4);
+      expect(h.rawSends).toHaveLength(4);
+      expect(h.consume).toHaveBeenCalledTimes(1);
+      expect(h.signedNonces()).toEqual([5, 5, 5, 5]);
       expect(onRetry).toHaveBeenCalledTimes(3);
       expect(h.receipts).toEqual([]);
+    });
+
+    it('does not retry when a json-rpc signer rejected the request', async () => {
+      const h = makeHarness({ jsonRpcAccount: true });
+      h.sendErrors.push(new viem.UserRejectedRequestError(new Error('user said no')));
+
+      await expect(
+        broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request)
+      ).rejects.toThrow('User rejected the request');
+
+      expect(h.calls.eth_sendTransaction).toBe(1);
     });
 
     it('retries json-rpc backed signers, which have no nonce manager', async () => {
