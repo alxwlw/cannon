@@ -10,7 +10,8 @@ import { ChainArtifacts, ChainBuilderContext, ContractArtifact } from '../types'
 import { encodeDeployData, getContractDefinitionFromPath, getMergedAbiFromContractPaths } from '../util';
 import { template } from '../utils/template';
 import { CannonAction } from '../actions';
-import { getBlockRetried, sendTransactionWithRetry } from '../helpers';
+import { getBlockRetried } from '../helpers';
+import { parseGasLimit } from '../broadcast';
 
 const debug = Debug('cannon:builder:deploy');
 
@@ -262,23 +263,7 @@ const deploySpec = {
       }),
     };
 
-    const overrides: any = {};
-
-    if (config.overrides?.gasLimit) {
-      overrides.gasLimit = config.overrides.gasLimit;
-    }
-
-    if (runtime.gasPrice) {
-      overrides.gasPrice = runtime.gasPrice;
-    }
-
-    if (runtime.gasFee) {
-      overrides.maxFeePerGas = runtime.gasFee;
-    }
-
-    if (runtime.priorityGasFee) {
-      overrides.maxPriorityFeePerGas = runtime.priorityGasFee;
-    }
+    const gas = parseGasLimit(config.overrides?.gasLimit);
 
     let receipt: viem.TransactionReceipt | null = null;
     let deployAddress: viem.Address;
@@ -312,14 +297,7 @@ const deploySpec = {
             ? await runtime.getSigner(config.from as viem.Address)
             : await runtime.getDefaultSigner!(txn, config.salt);
 
-          const fullCreate2Txn = _.assign(create2Txn, overrides, { account: signer.wallet.account || signer.address });
-          debug('final create2 txn', fullCreate2Txn);
-
-          const hash = await sendTransactionWithRetry(signer, async () => {
-            const preparedTxn = await runtime.provider.prepareTransactionRequest(fullCreate2Txn);
-            return signer.wallet.sendTransaction(preparedTxn as any);
-          });
-          receipt = await runtime.provider.waitForTransactionReceipt({ hash });
+          receipt = await runtime.sendTransaction(signer, { ...create2Txn, gas });
           debug('arachnid create2 complete', receipt);
         }
         deployAddress = addr;
@@ -359,21 +337,18 @@ const deploySpec = {
           if (config.overrides?.simulate) {
             // if the code goes here, it means that the Create2 deployment failed
             // and prepareTransactionRequest will throw an error with the underlying revert message
-            await runtime.provider.prepareTransactionRequest(
-              _.assign(txn, overrides, { account: signer.wallet.account || signer.address })
-            );
+            await runtime.provider.prepareTransactionRequest({
+              ...txn,
+              account: signer.wallet.account || signer.address,
+              chain: runtime.provider.chain,
+              gas,
+            });
 
             throw new Error(
               'The CREATE2 contract seems to be failing in the constructor. However, we were not able to get a stack trace.'
             );
           } else {
-            const hash = await sendTransactionWithRetry(signer, async () => {
-              const preparedTxn = await runtime.provider.prepareTransactionRequest(
-                _.assign(txn, overrides, { account: signer.wallet.account || signer.address })
-              );
-              return signer.wallet.sendTransaction(preparedTxn as any);
-            });
-            receipt = await runtime.provider.waitForTransactionReceipt({ hash });
+            receipt = await runtime.sendTransaction(signer, { ...txn, gas });
             deployAddress = receipt.contractAddress!;
           }
         }
