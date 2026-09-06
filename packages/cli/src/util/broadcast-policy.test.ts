@@ -15,5 +15,6 @@ describe('parseBroadcastPolicy()', () => {
     expect(() => parseBroadcastPolicy('-1')).toThrow('--broadcast-retries');
     expect(() => parseBroadcastPolicy('1.5')).toThrow('--broadcast-retries');
     expect(() => parseBroadcastPolicy('abc')).toThrow('--broadcast-retries');
+    expect(() => parseBroadcastPolicy('')).toThrow('--broadcast-retries');
   });
 });
