@@ -146,6 +146,26 @@ describe('broadcast.ts', () => {
       expect(onRetry).toHaveBeenCalledWith(1, 4, expect.any(Error));
     });
 
+    it('still retries when resetting the nonce manager itself fails', async () => {
+      const h = makeHarness();
+      h.sendErrors.push(new Error('rpc glitch'));
+      h.reset.mockImplementationOnce(() => {
+        throw new Error('reset blew up');
+      });
+      const onRetry = jest.fn();
+
+      const receipt = await broadcastTransaction(
+        { signer: h.signer, provider: h.provider, policy: fastPolicy, onRetry },
+        request
+      );
+
+      expect(receipt.transactionHash).toBe(TX_HASH);
+      expect(h.reset).toHaveBeenCalledTimes(1);
+      expect(h.calls.eth_sendRawTransaction).toBe(2);
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onRetry).toHaveBeenCalledWith(1, 4, expect.any(Error));
+    });
+
     it('sends exactly once when retries is 0', async () => {
       const h = makeHarness();
       h.sendErrors.push(new Error('rpc glitch'));
