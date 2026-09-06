@@ -174,6 +174,17 @@ describe('runtime.ts', () => {
 
         expect(receiver).toHaveBeenCalledTimes(Object.keys(Events).length);
       });
+
+      it('increments BroadcastRetry depth across nested derive() calls', () => {
+        const child = runtime.derive({});
+        const grandchild = child.derive({});
+        const receiver = jest.fn();
+        runtime.on(Events.BroadcastRetry, receiver);
+
+        grandchild.emit(Events.BroadcastRetry, 1, 4, new Error('x'), 0);
+
+        expect(receiver).toHaveBeenCalledWith(1, 4, expect.any(Error), 2);
+      });
     });
 
     describe('sendTransaction()', () => {
@@ -223,6 +234,28 @@ describe('runtime.ts', () => {
 
         expect(provider.prepareTransactionRequest).toHaveBeenCalledWith(
           expect.objectContaining({ gasPrice, type: 'legacy' })
+        );
+      });
+
+      it('applies no fee override when neither gasFee nor gasPrice is set', async () => {
+        const bareRuntime = runtime.derive({});
+        const signer = fixtureSigner();
+        const rx = fixtureTransactionReceipt();
+
+        jest.mocked(provider.prepareTransactionRequest).mockImplementation(async (args) => args as any);
+        jest.mocked(signer.wallet.sendTransaction).mockResolvedValue(rx.transactionHash);
+        jest.mocked(provider.waitForTransactionReceipt).mockResolvedValue(rx);
+
+        await bareRuntime.sendTransaction(signer, { to: signer.address });
+
+        expect(provider.prepareTransactionRequest).toHaveBeenCalledWith(
+          expect.not.objectContaining({ gasPrice: expect.anything() })
+        );
+        expect(provider.prepareTransactionRequest).toHaveBeenCalledWith(
+          expect.not.objectContaining({ maxFeePerGas: expect.anything() })
+        );
+        expect(provider.prepareTransactionRequest).toHaveBeenCalledWith(
+          expect.not.objectContaining({ maxPriorityFeePerGas: expect.anything() })
         );
       });
 
