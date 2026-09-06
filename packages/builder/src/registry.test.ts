@@ -1,6 +1,7 @@
 import * as viem from 'viem';
 import { fixtureAddress, fixtureSigner, fixtureTransactionReceipt, makeFakeProvider } from '../test/fixtures';
 import { CannonSigner } from './';
+import { prepareMulticall } from './multicall';
 import { CannonRegistry, OnChainRegistry } from './registry';
 
 describe('registry.ts', () => {
@@ -116,12 +117,10 @@ describe('registry.ts', () => {
           .mockResolvedValueOnce('0x69D36DFe281136ef662ED1A2E80a498A5461226D')
           .mockResolvedValueOnce(['0x69D36DFe281136ef662ED1A2E80a498A5461226D']);
 
-        jest
-          .mocked(signer.wallet.writeContract)
-          .mockResolvedValueOnce({} as any)
-          .mockResolvedValueOnce({} as any);
-
         const rx = fixtureTransactionReceipt();
+
+        jest.mocked(provider.prepareTransactionRequest).mockImplementation(async (args) => args as any);
+        jest.mocked(signer.wallet.sendTransaction).mockResolvedValue(rx.transactionHash);
 
         jest.mocked(provider.waitForTransactionReceipt).mockResolvedValue(rx);
 
@@ -153,12 +152,11 @@ describe('registry.ts', () => {
         jest.mocked(provider.simulateContract).mockResolvedValue({ request: {} } as any);
         jest.mocked(provider.readContract).mockResolvedValue(signer.address);
 
-        jest
-          .mocked(signer.wallet.writeContract)
-          .mockResolvedValueOnce({} as any)
-          .mockResolvedValueOnce({} as any);
-
         const rx = fixtureTransactionReceipt();
+
+        jest.mocked(provider.prepareTransactionRequest).mockImplementation(async (args) => args as any);
+        jest.mocked(signer.wallet.sendTransaction).mockResolvedValue(rx.transactionHash);
+
         jest.mocked(provider.waitForTransactionReceipt).mockResolvedValue(rx);
         jest.mocked(provider.getGasPrice).mockResolvedValue(100n);
         jest.mocked(provider.estimateContractGas).mockResolvedValue(100n);
@@ -172,7 +170,14 @@ describe('registry.ts', () => {
         // should only return the first receipt because its a multicall
         expect(retValue).toStrictEqual([rx.transactionHash]);
 
-        // TODO: check the transaction which was sent (its hard to do here because it comes in as the signed txn)
+        // This scenario combines 3 calls (setPackageOwnership + 2x publish) into a multicall, so the
+        // send target is the multicall aggregator address (`prepareMulticall`'s constant), not
+        // `fakeRegistryAddress` directly -- the registry address only appears as a `target` inside
+        // the encoded calldata.
+        expect(signer.wallet.sendTransaction).toHaveBeenCalledTimes(1);
+        expect(signer.wallet.sendTransaction).toHaveBeenCalledWith(
+          expect.objectContaining({ to: prepareMulticall([]).address, data: expect.stringMatching(/^0x/) })
+        );
       });
     });
 
