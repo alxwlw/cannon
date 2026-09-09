@@ -1,4 +1,5 @@
 import * as viem from 'viem';
+import { DEFAULT_BROADCAST_POLICY } from './broadcast';
 import { IPFSLoader } from './loader';
 import { ChainBuilderRuntime, Events } from './runtime';
 import { ContractArtifact } from './types';
@@ -189,7 +190,7 @@ describe('runtime.ts', () => {
 
     describe('sendTransaction()', () => {
       it('defaults broadcastPolicy when none is given', () => {
-        expect(runtime.broadcastPolicy).toEqual({ retries: 3, minTimeout: 250, factor: 2 });
+        expect(runtime.broadcastPolicy).toEqual(DEFAULT_BROADCAST_POLICY);
       });
 
       it('applies the runtime gas settings and returns the receipt', async () => {

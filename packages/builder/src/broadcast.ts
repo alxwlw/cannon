@@ -12,9 +12,25 @@ export type BroadcastPolicy = {
   minTimeout: number;
   // exponential backoff factor applied between retries
   factor: number;
+  // how long a receipt may keep reporting a placeholder block hash before the send is given up, in
+  // milliseconds — see waitForSealedReceipt. Defaults to DEFAULT_BROADCAST_POLICY.sealTimeout.
+  sealTimeout?: number;
 };
 
-export const DEFAULT_BROADCAST_POLICY: BroadcastPolicy = { retries: 3, minTimeout: 250, factor: 2 };
+export const DEFAULT_BROADCAST_POLICY: BroadcastPolicy = { retries: 3, minTimeout: 250, factor: 2, sealTimeout: 60_000 };
+
+// MegaETH answers eth_getTransactionReceipt for a preconfirmed transaction with a block hash of all
+// `F`: the transaction landed, but its block is not sealed yet and no eth_getBlockByHash resolves that
+// hash — ever. The real hash shows up on a later receipt read, usually within a second or two.
+const PLACEHOLDER_BLOCK_HASH = /^0xf{64}$/i;
+
+// polling for the sealed receipt backs off from the policy's minTimeout but never sleeps longer than this
+const MAX_SEAL_POLL_MS = 1_000;
+
+// only the exact placeholder counts; a receipt without a block hash (unit doubles) is treated as sealed
+function isPreconfirmedReceipt(receipt: Pick<viem.TransactionReceipt, 'blockHash'> | undefined): boolean {
+  return PLACEHOLDER_BLOCK_HASH.test(receipt?.blockHash ?? '');
+}
 
 // fee fields mirror viem's discriminated request type: a transaction is either legacy (gasPrice) or
 // EIP-1559 (maxFeePerGas / maxPriorityFeePerGas), never both
@@ -135,7 +151,54 @@ export async function broadcastTransaction(
       ? await broadcastSigned(ctx, request, account)
       : await broadcastViaWallet(ctx, request, account);
 
-  return ctx.provider.waitForTransactionReceipt({ hash });
+  return waitForSealedReceipt(ctx, await ctx.provider.waitForTransactionReceipt({ hash }));
+}
+
+// A receipt that still carries the placeholder block hash is re-read until the node reports the sealed
+// block, and the re-read receipt is what gets returned: every field the steps consume afterwards
+// (logs, blockNumber, blockHash) then comes from the sealed state. Without this the steps asked for
+// the block by the placeholder hash, got BlockNotFoundError and recorded the operation as skipped even
+// though it had executed — the state Cannon could not repair on the next build. A receipt that goes
+// missing while polling counts as still pending. Gives up after the policy's sealTimeout with an error
+// naming the hash, which is the one line the operator sees inside `Skipping [...]`.
+async function waitForSealedReceipt(
+  ctx: BroadcastContext,
+  receipt: viem.TransactionReceipt
+): Promise<viem.TransactionReceipt> {
+  if (!isPreconfirmedReceipt(receipt)) return receipt;
+
+  const policy = ctx.policy ?? DEFAULT_BROADCAST_POLICY;
+  const sealTimeout = policy.sealTimeout ?? DEFAULT_BROADCAST_POLICY.sealTimeout!;
+  const hash = receipt.transactionHash;
+  const started = Date.now();
+  let delay = policy.minTimeout;
+  let reads = 0;
+
+  debug(`receipt ${hash} reports the placeholder block hash; waiting up to ${sealTimeout} ms for its block to seal`);
+
+  for (;;) {
+    const elapsed = Date.now() - started;
+    if (elapsed >= sealTimeout) {
+      throw new Error(
+        `transaction ${hash} still reports the placeholder block hash after ${elapsed} ms and ${reads} receipt re-reads; the node has not sealed its block`
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, Math.min(delay, sealTimeout - elapsed)));
+    delay = Math.min(delay * policy.factor, MAX_SEAL_POLL_MS);
+    reads++;
+
+    try {
+      const fresh = await ctx.provider.getTransactionReceipt({ hash });
+      if (!isPreconfirmedReceipt(fresh)) {
+        debug(`receipt ${hash} sealed in block ${fresh.blockHash} after ${Date.now() - started} ms`);
+        return fresh;
+      }
+    } catch (err) {
+      if (!(err instanceof viem.TransactionReceiptNotFoundError)) throw err;
+      debug(`receipt ${hash} not found while waiting for its block to seal; treating it as still pending`);
+    }
+  }
 }
 
 // Local accounts: sign and broadcast the raw transaction locally. Every attempt re-prepares on the

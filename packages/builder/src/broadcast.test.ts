@@ -9,6 +9,11 @@ const CHAIN: viem.Chain = { ...mainnet, id: 6343 };
 const PRIVATE_KEY = '0x1111111111111111111111111111111111111111111111111111111111111111';
 const TX_HASH = `0x${'ab'.repeat(32)}` as viem.Hash;
 const TARGET = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as viem.Address;
+const REAL_BLOCK_HASH = `0x${'cd'.repeat(32)}` as viem.Hash;
+// what MegaETH reports on the receipt of a preconfirmed transaction whose block is not sealed yet
+const PLACEHOLDER_BLOCK_HASH = `0x${'f'.repeat(64)}` as viem.Hash;
+// queue sentinel: the fake node answers eth_getTransactionReceipt with null for that read
+const MISSING_RECEIPT = `0x${'ee'.repeat(32)}` as viem.Hash;
 
 // The RPC keeps answering a stale pending nonce (5) no matter what was already sent. This is the
 // strict-ordering / lagging-replica behaviour from issue #1875 that the pipeline has to survive.
@@ -25,6 +30,10 @@ type Harness = {
   signedNonces: () => number[];
   signedTxns: () => viem.TransactionSerializableGeneric[];
   receipts: viem.Hash[];
+  // block hashes the fake node reports for the sent transaction, one per receipt read: the first is
+  // handed out by waitForTransactionReceipt, the rest by eth_getTransactionReceipt. The last entry is
+  // repeated once the queue runs dry. Empty means a sealed receipt with REAL_BLOCK_HASH right away.
+  blockHashes: viem.Hash[];
   rawSends: viem.Hex[];
   known: Set<viem.Hash>;
   setPriorityFee: (hex: viem.Hex) => void;
@@ -36,9 +45,17 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
   const lookupErrors: Error[] = [];
   const prepareErrors: Error[] = [];
   const receipts: viem.Hash[] = [];
+  const blockHashes: viem.Hash[] = [];
   const rawSends: viem.Hex[] = [];
   const known = new Set<viem.Hash>();
   let priorityFee: viem.Hex = '0x1';
+
+  const nextBlockHash = (): viem.Hash => {
+    if (blockHashes.length === 0) return REAL_BLOCK_HASH;
+    return blockHashes.length > 1 ? blockHashes.shift()! : blockHashes[0];
+  };
+  const fakeReceipt = (hash: viem.Hash, blockHash: viem.Hash) =>
+    ({ transactionHash: hash, blockHash, status: 'success' } as viem.TransactionReceipt);
 
   // retryCount: 0 — viem's transport-level retry would otherwise swallow the injected failures
   const transport = viem.custom(
@@ -78,6 +95,27 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
             const err = sendErrors.shift();
             if (err) throw err;
             return TX_HASH;
+          }
+          case 'eth_getTransactionReceipt': {
+            const [hash] = params as [viem.Hash];
+            const blockHash = nextBlockHash();
+            if (blockHash === MISSING_RECEIPT) return null;
+            return {
+              transactionHash: hash,
+              blockHash,
+              blockNumber: '0x1',
+              transactionIndex: '0x0',
+              from: TARGET,
+              to: TARGET,
+              cumulativeGasUsed: '0x5208',
+              gasUsed: '0x5208',
+              effectiveGasPrice: '0x1',
+              contractAddress: null,
+              logs: [],
+              logsBloom: `0x${'0'.repeat(512)}`,
+              status: '0x1',
+              type: '0x2',
+            };
           }
           case 'eth_getTransactionByHash': {
             const [hash] = params as [viem.Hash];
@@ -122,7 +160,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
   const provider = viem.createPublicClient({ chain: CHAIN, transport }).extend((client) => ({
     waitForTransactionReceipt: async ({ hash }: { hash: viem.Hash }) => {
       receipts.push(hash);
-      return { transactionHash: hash, status: 'success' } as viem.TransactionReceipt;
+      return fakeReceipt(hash, nextBlockHash());
     },
     // shifts an injected failure before delegating to the real prepare, so tests still exercise viem's
     // actual prepareTransactionRequest path (fee/gas estimation) rather than a stubbed-out replacement
@@ -144,6 +182,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
     signedNonces: () => signTransaction.mock.calls.map(([tx]) => Number(tx.nonce)),
     signedTxns: () => signTransaction.mock.calls.map(([tx]) => tx as viem.TransactionSerializableGeneric),
     receipts,
+    blockHashes,
     rawSends,
     known,
     setPriorityFee: (hex) => {
@@ -177,7 +216,7 @@ describe('broadcast.ts', () => {
     const fastPolicy = { retries: 3, minTimeout: 1, factor: 1 };
 
     it('has a default policy of 3 retries with backoff', () => {
-      expect(DEFAULT_BROADCAST_POLICY).toEqual({ retries: 3, minTimeout: 250, factor: 2 });
+      expect(DEFAULT_BROADCAST_POLICY).toEqual({ retries: 3, minTimeout: 250, factor: 2, sealTimeout: 60_000 });
     });
 
     it('signs locally, consumes the nonce once and awaits the receipt by the raw transaction hash', async () => {
@@ -411,6 +450,63 @@ describe('broadcast.ts', () => {
       const [signed] = h.signedTxns();
       expect(signed.type).toBe('legacy');
       expect(signed.gasPrice).toBe(BigInt(9));
+    });
+
+    describe('preconfirmed receipts', () => {
+      it('returns the receipt as-is when its block hash is real', async () => {
+        const h = makeHarness();
+
+        const receipt = await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+
+        expect(receipt.blockHash).toBe(REAL_BLOCK_HASH);
+        expect(h.calls.eth_getTransactionReceipt).toBeUndefined();
+      });
+
+      it('re-reads a receipt carrying the placeholder block hash until the block is sealed', async () => {
+        const h = makeHarness();
+        h.blockHashes.push(PLACEHOLDER_BLOCK_HASH, PLACEHOLDER_BLOCK_HASH, REAL_BLOCK_HASH);
+
+        const receipt = await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+
+        // the sealed receipt is what comes back, not the placeholder one the wait resolved with
+        expect(receipt.blockHash).toBe(REAL_BLOCK_HASH);
+        expect(receipt.transactionHash).toBe(viem.keccak256(h.rawSends[0]));
+        expect(h.calls.eth_getTransactionReceipt).toBe(2);
+        // the transaction itself was sent exactly once
+        expect(h.rawSends).toHaveLength(1);
+      });
+
+      it('keeps polling when the receipt disappears while the block seals', async () => {
+        const h = makeHarness();
+        h.blockHashes.push(PLACEHOLDER_BLOCK_HASH, MISSING_RECEIPT, REAL_BLOCK_HASH);
+
+        const receipt = await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+
+        expect(receipt.blockHash).toBe(REAL_BLOCK_HASH);
+        expect(h.calls.eth_getTransactionReceipt).toBe(2);
+      });
+
+      it('gives up after sealTimeout when the placeholder never resolves', async () => {
+        const h = makeHarness();
+        h.blockHashes.push(PLACEHOLDER_BLOCK_HASH);
+        const policy = { ...fastPolicy, sealTimeout: 20 };
+
+        await expect(broadcastTransaction({ signer: h.signer, provider: h.provider, policy }, request)).rejects.toThrow(
+          /placeholder block hash/
+        );
+
+        expect(h.calls.eth_getTransactionReceipt).toBeGreaterThanOrEqual(1);
+      });
+
+      it('does not poll for a receipt without a block hash, as unit doubles hand out', async () => {
+        const h = makeHarness();
+        h.blockHashes.push(undefined as unknown as viem.Hash);
+
+        const receipt = await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+
+        expect(receipt.blockHash).toBeUndefined();
+        expect(h.calls.eth_getTransactionReceipt).toBeUndefined();
+      });
     });
   });
 });
