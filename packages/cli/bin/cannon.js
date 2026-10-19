@@ -2,11 +2,12 @@
 
 const { red } = require('chalk');
 const cli = require('../dist/src');
+const { exitAfterFlush } = require('../dist/src/util/exit-after-flush');
 
 cli.default
   .parseAsync()
   .then(() => {
-    process.exit();
+    exitAfterFlush();
   })
   .catch((err) => {
     if (err.message) {
@@ -16,5 +17,5 @@ cli.default
     //eslint-disable-next-line no-console
     console.error(err);
 
-    process.exit(process.exitCode || 1);
+    exitAfterFlush(process.exitCode || 1);
   });

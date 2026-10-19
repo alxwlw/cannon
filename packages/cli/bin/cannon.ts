@@ -2,11 +2,12 @@
 
 import { red } from 'chalk';
 import cli from '../src';
+import { exitAfterFlush } from '../src/util/exit-after-flush';
 
 cli
   .parseAsync()
   .then(() => {
-    process.exit();
+    exitAfterFlush();
   })
   .catch((err) => {
     if (err.message) {
@@ -16,5 +17,5 @@ cli
     //eslint-disable-next-line no-console
     console.error(err);
 
-    process.exit(process.exitCode || 1);
+    exitAfterFlush(process.exitCode || 1);
   });
