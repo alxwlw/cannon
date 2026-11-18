@@ -281,7 +281,15 @@ async function broadcastViaWallet(
     async (retry, attempt) => {
       try {
         const prepared = await provider.prepareTransactionRequest(toPrepareParameters(request, account, provider.chain));
-        return await signer.wallet.sendTransaction({ ...prepared, account, chain: signer.wallet.chain });
+        // prepare can hand back both fee models: a viem that fills the request through eth_fillTransaction
+        // (2.51.3 does, 2.30.1 does not) copies the node's gasPrice next to maxFeePerGas /
+        // maxPriorityFeePerGas. The node gets the one the prepared type names, as toSignParameters does for
+        // local accounts; anvil 1.9.0 rejects a request carrying both with -32602 (1.8.1 accepted it).
+        const fees =
+          prepared.type === 'legacy'
+            ? { maxFeePerGas: undefined, maxPriorityFeePerGas: undefined }
+            : { gasPrice: undefined };
+        return await signer.wallet.sendTransaction({ ...prepared, ...fees, account, chain: signer.wallet.chain });
       } catch (err) {
         if (isUserRejection(err)) throw err;
 
