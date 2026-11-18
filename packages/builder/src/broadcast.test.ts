@@ -35,11 +35,22 @@ type Harness = {
   // repeated once the queue runs dry. Empty means a sealed receipt with REAL_BLOCK_HASH right away.
   blockHashes: viem.Hash[];
   rawSends: viem.Hex[];
+  // the request objects json-rpc signers hand to eth_sendTransaction, as the node receives them
+  walletSends: Record<string, unknown>[];
   known: Set<viem.Hash>;
   setPriorityFee: (hex: viem.Hex) => void;
 };
 
-function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
+function makeHarness(
+  opts: {
+    jsonRpcAccount?: boolean;
+    // fields merged into every prepareTransactionRequest result. A viem that fills the request through
+    // eth_fillTransaction (2.51.3 does) copies the node's gasPrice next to maxFeePerGas /
+    // maxPriorityFeePerGas; the viem this package tests against (2.30.1) has no such path, so the shape
+    // is injected here.
+    preparedExtra?: Record<string, unknown>;
+  } = {}
+): Harness {
   const calls: Record<string, number> = {};
   const sendErrors: Error[] = [];
   const lookupErrors: Error[] = [];
@@ -47,6 +58,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
   const receipts: viem.Hash[] = [];
   const blockHashes: viem.Hash[] = [];
   const rawSends: viem.Hex[] = [];
+  const walletSends: Record<string, unknown>[] = [];
   const known = new Set<viem.Hash>();
   let priorityFee: viem.Hex = '0x1';
 
@@ -92,6 +104,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
             return viem.keccak256(raw);
           }
           case 'eth_sendTransaction': {
+            walletSends.push((params as [Record<string, unknown>])[0]);
             const err = sendErrors.shift();
             if (err) throw err;
             return TX_HASH;
@@ -167,7 +180,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
     prepareTransactionRequest: (async (args: Parameters<typeof client.prepareTransactionRequest>[0]) => {
       const err = prepareErrors.shift();
       if (err) throw err;
-      return client.prepareTransactionRequest(args);
+      return { ...(await client.prepareTransactionRequest(args)), ...opts.preparedExtra };
     }) as typeof client.prepareTransactionRequest,
   }));
 
@@ -184,6 +197,7 @@ function makeHarness(opts: { jsonRpcAccount?: boolean } = {}): Harness {
     receipts,
     blockHashes,
     rawSends,
+    walletSends,
     known,
     setPriorityFee: (hex) => {
       priorityFee = hex;
@@ -418,6 +432,40 @@ describe('broadcast.ts', () => {
       expect(receipt.transactionHash).toBe(TX_HASH);
       expect(h.calls.eth_sendTransaction).toBe(2);
       expect(h.calls.eth_sendRawTransaction).toBeUndefined();
+    });
+
+    // anvil 1.9.0 rejects such a request with -32602 "both gasPrice and (maxFeePerGas or
+    // maxPriorityFeePerGas) specified"; hardhat-cannon deploys on the cannon network through this path
+    it('sends only the EIP-1559 fees from a json-rpc signer when prepare also returned a gasPrice', async () => {
+      const h = makeHarness({ jsonRpcAccount: true, preparedExtra: { gasPrice: BigInt(1200000000) } });
+
+      await broadcastTransaction({ signer: h.signer, provider: h.provider, policy: fastPolicy }, request);
+
+      expect(h.calls.eth_sendTransaction).toBe(1);
+      const [sent] = h.walletSends;
+      expect(sent.type).toBe('0x2');
+      expect(sent.gasPrice).toBeUndefined();
+      expect(sent.maxFeePerGas).toBeDefined();
+      expect(sent.maxPriorityFeePerGas).toBeDefined();
+    });
+
+    it('sends only the gasPrice from a json-rpc signer when a legacy prepare also carried EIP-1559 fees', async () => {
+      const h = makeHarness({
+        jsonRpcAccount: true,
+        preparedExtra: { maxFeePerGas: BigInt(12), maxPriorityFeePerGas: BigInt(10) },
+      });
+
+      await broadcastTransaction(
+        { signer: h.signer, provider: h.provider, policy: fastPolicy },
+        { ...request, gasPrice: BigInt(9) }
+      );
+
+      expect(h.calls.eth_sendTransaction).toBe(1);
+      const [sent] = h.walletSends;
+      expect(sent.type).toBe('0x0');
+      expect(sent.gasPrice).toBe('0x9');
+      expect(sent.maxFeePerGas).toBeUndefined();
+      expect(sent.maxPriorityFeePerGas).toBeUndefined();
     });
 
     it('passes explicit gas and EIP-1559 fees through to the signed transaction', async () => {

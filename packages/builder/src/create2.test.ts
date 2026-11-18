@@ -26,6 +26,7 @@ describe('util.ts', () => {
 
     it('calls sendTransaction to create aracnid contract if not deployed', async () => {
       jest.mocked(fakeRuntime.provider.getCode).mockResolvedValue('0x');
+      jest.mocked(fakeRuntime.provider.prepareTransactionRequest).mockImplementation(async (args) => args as any);
 
       const fakeSigner = makeFakeSigner(ARACHNID_DEFAULT_DEPLOY_ADDR);
 
