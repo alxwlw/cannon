@@ -27,11 +27,19 @@ const CLONE: RawChainDefinition = {
   clone: { x: { source: SOURCE, target: 'plan-pending-cloned:1.0.0' } },
 };
 
+const CLONE_DEP: RawChainDefinition = {
+  name: 'plan-pending-clone-dep',
+  version: '1.0.0',
+  clone: { x: { source: SOURCE, target: 'plan-pending-cloned-dep:1.0.0' } },
+  invoke: { touch: { target: ['x.fixture'], func: 'setLimit', args: ['9', '4'] } },
+};
+
 describe('plan pending changes', () => {
   let node: CannonRpcNode;
   let url: string;
   let main: Awaited<ReturnType<typeof buildFixtureRecord>>;
   let cloned: Awaited<ReturnType<typeof buildFixtureRecord>>;
+  let clonedDep: Awaited<ReturnType<typeof buildFixtureRecord>>;
   let mainStorage: ReturnType<typeof fixtureStorage>;
   let cloneStorage: ReturnType<typeof fixtureStorage>;
 
@@ -72,6 +80,7 @@ describe('plan pending changes', () => {
       cloneStorage
     );
     cloned = await buildFixtureRecord(url, CLONE, cloneStorage);
+    clonedDep = await buildFixtureRecord(url, CLONE_DEP, cloneStorage);
   }, 120000);
 
   afterAll(async () => {
@@ -178,6 +187,66 @@ describe('plan pending changes', () => {
         { step: 'invoke.setValue', change: 'may-change' },
       ]);
     });
+  });
+
+  // a step the record keeps with a SKIP hash is never changed by itself, so it shows only what it inherits
+  const inject = (record: DeploymentInfo, def: RawChainDefinition, steps: Record<string, string>) => {
+    const r = _.cloneDeep(record);
+    r.def = def;
+    for (const step of Object.keys(steps)) r.state[step] = { artifacts: {}, hash: 'SKIP', version: 3 } as any;
+    return r;
+  };
+
+  describe('may-change reaches dependents through the whole chain, from every output kind', () => {
+    it('a dependent of a dependent of a changed deploy may change', async () => {
+      // invoke.b names no contract: its only link to deploy.fixture is through invoke.setValue
+      const def = editedDef((d) => {
+        d.deploy.fixture.args = [ADDRESS_A];
+        d.invoke.b = { target: [ADDRESS_A], func: 'setValue', args: ['1'], depends: ['invoke.setValue'] };
+      });
+      const record = inject(main.record, def, { 'invoke.b': '' });
+      expect(await pending(record, mainStorage, def)).toEqual([
+        { step: 'deploy.fixture', change: 'changed' },
+        { step: 'invoke.allowA', change: 'may-change' },
+        { step: 'invoke.setValue', change: 'may-change' },
+        { step: 'invoke.b', change: 'may-change' },
+      ]);
+    });
+
+    it('a changed clone makes the invoke on it may-change', async () => {
+      const def = editedDef((d) => (d.clone.x.source = 'plan-pending-child:2.0.0'), CLONE_DEP);
+      expect(await pending(clonedDep.record, cloneStorage, def)).toEqual([
+        { step: 'clone.x', change: 'changed' },
+        { step: 'invoke.touch', change: 'may-change' },
+      ]);
+    });
+
+    it('a changed router makes its dependent may-change', async () => {
+      // a router is built from compiled source, which a plan never does: the recorded router has no artifact, so
+      // its state cannot be computed and it is changed. Its dependent keeps a SKIP hash and shows only the inherited change.
+      const def = editedDef((d) => {
+        d.router = { r: { contracts: ['fixture'] } };
+        d.invoke.afterRouter = { target: [ADDRESS_A], func: 'setValue', args: ['1'], depends: ['router.r'] };
+      });
+      const record = inject(main.record, def, { 'invoke.afterRouter': '' });
+      record.state['router.r'] = { artifacts: {}, hash: 'recorded', version: 3 } as any;
+      expect(await pending(record, mainStorage, def)).toEqual([
+        { step: 'router.r', change: 'changed' },
+        { step: 'invoke.afterRouter', change: 'may-change' },
+      ]);
+    });
+  });
+
+  it('a record without a misc url is still compared', async () => {
+    const def: RawChainDefinition = {
+      name: 'plan-pending-nomisc',
+      version: '1.0.0',
+      invoke: { b: { target: [ADDRESS_A], func: 'setValue', args: ['1'] } },
+    };
+    const record = inject(main.record, def, { 'invoke.b': '' });
+    record.state = { 'invoke.b': record.state['invoke.b'] };
+    delete (record as any).miscUrl;
+    expect(await pending(record, mainStorage, def)).toEqual([]);
   });
 
   describe('createReadOnlyRuntime', () => {
