@@ -308,6 +308,17 @@ describe('toMarkdown', () => {
     expect(mdB).toContain(`| "${'x'.repeat(198)}… |`);
   });
 
+  it('never splits a surrogate pair at the cut', () => {
+    // the 199th code unit, where the cut falls, is the first half of the emoji
+    const detail = 'a'.repeat(198) + '\u{1F600}' + 'b'.repeat(10);
+    const md = toMarkdown(report([driftStep({ detail })]));
+    expect(md).toContain(`| ${'a'.repeat(198)}… |`);
+    expect(Buffer.from(md, 'utf8').toString('utf8')).toBe(md);
+    // a pair that ends before the cut stays whole
+    const whole = 'a'.repeat(197) + '\u{1F600}' + 'b'.repeat(10);
+    expect(toMarkdown(report([driftStep({ detail: whole })]))).toContain(`| ${'a'.repeat(197)}\u{1F600}… |`);
+  });
+
   it('truncates before escaping, so escapes may lengthen the cell', () => {
     const md = toMarkdown(
       report([driftStep({ check: { rule: 'r', getter: 'g', expected: '|'.repeat(300), actual: 'y' } })])

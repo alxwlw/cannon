@@ -287,6 +287,20 @@ describe('walkRecord', () => {
     expect(rows).toHaveLength(6);
   });
 
+  it('the contract of a router or diamond step carries that kind, not deploy', async () => {
+    // a router is compiled from generated source, which no fixture does: its record entry is put in by hand
+    const router = edited((r) => {
+      (r.def as Record<string, unknown>).router = { r: { contracts: ['fixture'] } };
+      r.state['router.r'] = {
+        artifacts: { contracts: { Router: { ...r.state['deploy.fixture'].artifacts.contracts!.fixture } } },
+        hash: 'unused',
+        version: 7,
+      } as unknown as DeploymentInfo['state'][string];
+    });
+    const rows = byStep(await walkRecord(router, 'root', await opts()), 'router.r');
+    expect(rows.map((r) => [r.kind, r.status, r.target?.name])).toEqual([['router', 'in-sync', 'Router']]);
+  });
+
   it('a declared step absent from the record is unchecked as never executed', async () => {
     const record = edited((r) => delete r.state['invoke.setValue']);
     const rows = await walkRecord(record, 'root', await opts());

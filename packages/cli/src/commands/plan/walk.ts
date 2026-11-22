@@ -37,6 +37,8 @@ type Artifact = { deployedBytecode?: string; immutableReferences?: unknown };
 type StepConfig = { chains?: number[]; target?: string | string[]; func?: string; args?: unknown[]; abi?: string };
 
 const NOT_EXECUTED = 'declared, not in record (never executed)';
+const PULLED = 'pulled package — not checked';
+const BEYOND_DEPTH = 'nested package beyond --depth';
 const PACKAGE_STEP = '(package)';
 
 const byteLength = (hex: string | undefined) => (hex ? hex.replace(/^0x/i, '').length / 2 : null);
@@ -62,7 +64,8 @@ function findSetter(abi: viem.Abi, func: string): viem.AbiFunction | undefined {
 
 /**
  * Checks every step of a deployment record against the chain the reader is pinned to, and walks into the packages
- * it cloned. A pulled package is someone else's deployment: it is neither walked nor checked.
+ * it cloned. A pulled package is someone else's deployment: it is neither walked nor checked, its step is one
+ * `unchecked` row, as is a clone step past `depth`.
  * Never throws because of one step: a step that cannot be rendered or checked is an `error` row.
  * `order` is the index in the returned array; rows of nested packages follow their parent's.
  */
@@ -136,10 +139,14 @@ async function walkPackage(
     } else if (kind === 'clone') {
       if (depth > 0) {
         for (const [name, imp] of Object.entries(own.imports ?? {})) if (imp?.url) nested.push({ name, url: imp.url });
+      } else {
+        rows.push({ ...base, status: 'unchecked', detail: BEYOND_DEPTH });
       }
-    } else if (kind !== 'pull' && opts.bytecode) {
-      // not `pull`: a pulled package is someone else's deployment, its drift is not this package's (no rows, no walk)
-      for (const [name, c] of Object.entries(own.contracts ?? {})) rows.push(await checkCode(n, name, c));
+    } else if (kind === 'pull') {
+      // a pulled package is someone else's deployment, its drift is not this package's: one row, no walk
+      rows.push({ ...base, status: 'unchecked', detail: PULLED });
+    } else if (opts.bytecode) {
+      for (const [name, c] of Object.entries(own.contracts ?? {})) rows.push(await checkCode(n, kind, name, c));
     }
   }
 
@@ -273,8 +280,9 @@ async function walkPackage(
     return { ...withCall, status: verdict.outcome.status, ...checkFields(verdict) };
   }
 
-  async function checkCode(n: string, name: string, c: ContractData): Promise<Row> {
-    const base = { pkg, step: n, kind: 'deploy', target: { name, address: c.address } };
+  async function checkCode(n: string, kind: string, name: string, c: ContractData): Promise<Row> {
+    // the step's own kind: a router or diamond contract is not counted as a deploy
+    const base = { pkg, step: n, kind, target: { name, address: c.address } };
     try {
       const artifacts = await loadMisc();
       const art = artifacts[`${c.sourceName}:${c.contractName}`] ?? artifacts[c.contractName] ?? artifacts[name];

@@ -49,7 +49,8 @@ export function exitCodeOf(report: PlanReport): 0 | 2 {
 /** One table cell: truncated first, then escaped so that a value can never break the table. */
 function cell(text: string | undefined): string {
   if (!text) return '';
-  const clipped = text.length > MAX_CELL ? text.slice(0, MAX_CELL - 1) + '…' : text;
+  // the cut never splits a surrogate pair: a lone half would print as U+FFFD
+  const clipped = text.length > MAX_CELL ? text.slice(0, MAX_CELL - 1).replace(/[\uD800-\uDBFF]$/, '') + '…' : text;
   return clipped.replace(/\|/g, '\\|').replace(/\r?\n|\r/g, ' ');
 }
 

@@ -10,6 +10,8 @@ import { walkRecord, WalkOptions } from './walk';
 const CHAIN_ID = 13370;
 const OWNER = viem.getAddress('0x0000000000000000000000000000000000000b0b');
 const NOT_EXECUTED = 'declared, not in record (never executed)';
+const PULLED = 'pulled package — not checked';
+const BEYOND_DEPTH = 'nested package beyond --depth';
 const SOURCE = 'plan-walk-child:1.0.0';
 
 type Built = Awaited<ReturnType<typeof buildFixtureRecord>>;
@@ -126,13 +128,22 @@ describe('walkRecord: nested packages', () => {
     ]);
   });
 
-  it('a pulled package is someone else deployment: no rows and no walk, its contracts still serve own invokes', async () => {
-    expect(shape(await walkAt(pulled))).toEqual([['root', 'invoke.touchChild', 'invoke', 'in-sync', 0]]);
-    expect((await walkAt(pulled))[0].target?.address).toBe(child.addresses.fixture);
+  it('a pulled package is someone else deployment: one unchecked row, no walk, its contracts still serve own invokes', async () => {
+    const rows = await walkAt(pulled);
+    expect(shape(rows)).toEqual([
+      ['root', 'pull.child', 'pull', 'unchecked', 0],
+      ['root', 'invoke.touchChild', 'invoke', 'in-sync', 1],
+    ]);
+    expect(rows[0].detail).toBe(PULLED);
+    expect(rows[1].target?.address).toBe(child.addresses.fixture);
+    // a pulled package has no bytecode rows of this package either way
+    expect(shape(await walkAt(pulled, { bytecode: false }))).toEqual(shape(rows));
   });
 
-  it('legacy import.* is a pull: no rows, no walk, its own row reported as kind pull', async () => {
-    expect(await walkAt(legacyImport)).toEqual([]);
+  it('legacy import.* is a pull: one unchecked row, no walk, reported as kind pull', async () => {
+    expect(await walkAt(legacyImport)).toEqual([
+      { pkg: 'root', step: 'import.child', kind: 'pull', status: 'unchecked', order: 0, detail: PULLED },
+    ]);
     const neverRan = _.cloneDeep(legacyImport.record);
     delete neverRan.state['import.child'];
     expect(await walkAt(legacyImport, {}, neverRan)).toEqual([
@@ -140,9 +151,16 @@ describe('walkRecord: nested packages', () => {
     ]);
   });
 
-  it('depth bounds the walk: each level takes one', async () => {
-    expect(shape(await walkAt(grand, { depth: 0 }))).toEqual([]);
-    expect(shape(await walkAt(grand, { depth: 1 }))).toEqual([['root.parent', 'invoke.touchChild', 'invoke', 'in-sync', 0]]);
+  it('depth bounds the walk: each level takes one, a clone past it is one unchecked row', async () => {
+    expect(await walkAt(grand, { depth: 0 })).toEqual([
+      { pkg: 'root', step: 'clone.parent', kind: 'clone', status: 'unchecked', order: 0, detail: BEYOND_DEPTH },
+    ]);
+    const one = await walkAt(grand, { depth: 1 });
+    expect(shape(one)).toEqual([
+      ['root.parent', 'clone.child', 'clone', 'unchecked', 0],
+      ['root.parent', 'invoke.touchChild', 'invoke', 'in-sync', 1],
+    ]);
+    expect(one[0].detail).toBe(BEYOND_DEPTH);
     expect((await walkAt(grand, { depth: 2 })).map((r) => r.pkg)).toEqual([
       'root.parent',
       'root.parent.child',

@@ -333,12 +333,15 @@ describe('plan() orchestration', () => {
       storage
     );
 
-    const pkgs = async (depth?: number) =>
-      (await plan(options({ depth }), { loadRecord: loaded(b) })).report.steps.map((s) => s.pkg);
+    const rows = async (depth?: number) =>
+      (await plan(options({ depth }), { loadRecord: loaded(b) })).report.steps.map((s) => [s.pkg, s.step, s.status]);
 
-    // the parent declares no step of its own: every row comes from the cloned package
-    expect(await pkgs()).toEqual(['plan-test:1.0.0@main.x', 'plan-test:1.0.0@main.x']);
-    expect(await pkgs(0)).toEqual([]);
+    // the parent declares no step but the clone: every checked row comes from the cloned package
+    expect(await rows()).toEqual([
+      ['plan-test:1.0.0@main.x', 'deploy.fixture', 'in-sync'],
+      ['plan-test:1.0.0@main.x', 'invoke.setValue', 'in-sync'],
+    ]);
+    expect(await rows(0)).toEqual([['plan-test:1.0.0@main', 'clone.x', 'unchecked']]);
   });
 
   it('is read-only: no wallet client, no account from a key, and the command has no key option', async () => {
