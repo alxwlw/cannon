@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
 import os from 'node:os';
 import { types } from 'node:util';
@@ -27,12 +29,35 @@ describe('loadHints', () => {
     expectShape(await loadHints(fx('hints.cjs')));
   });
 
-  it('loads a .mjs module (default export) through the real import path', async () => {
-    expectShape(await loadHints(fx('hints.mjs')));
+  // jest's vm sandbox cannot run a native import(), so .mjs is loaded by the shipped code in a child node process.
+  const loadInChild = async (file: string) => {
+    const script = `
+      const { loadHints, isSkipped } = require(${JSON.stringify(path.join(__dirname, 'hints.ts'))});
+      loadHints(${JSON.stringify(file)}).then((h) => {
+        console.log(JSON.stringify({
+          checks: Object.keys(h.checks ?? {}),
+          skip: (h.skip ?? []).map((s) => (typeof s === 'string' ? s : { re: s.source })),
+          enumerations: (h.enumerations ?? []).length,
+          skipsMatch: isSkipped(h, 'invoke.setOtherXName'),
+        }));
+      }, (e) => { console.error(e.message); process.exit(1); });`;
+    const { stdout } = await promisify(execFile)(process.execPath, ['-r', 'ts-node/register/transpile-only', '-e', script], {
+      cwd: path.join(__dirname, '../../..'),
+    });
+    return JSON.parse(stdout);
+  };
+
+  it('loads a .mjs module (default export) through the native import path', async () => {
+    expect(await loadInChild(fx('hints.mjs'))).toEqual({
+      checks: ['setThing'],
+      skip: ['invoke.initializeThing', { re: '^invoke\\.setOther.*Name$' }],
+      enumerations: 1,
+      skipsMatch: true,
+    });
   });
 
-  it('falls back to the module namespace when there is no default export', async () => {
-    const h = await loadHints(fx('hints-named.mjs'));
+  it('uses the module namespace when a .mjs has no default export', async () => {
+    const h = await loadInChild(fx('hints-named.mjs'));
     expect(h.skip).toEqual(['invoke.namedOnly']);
   });
 

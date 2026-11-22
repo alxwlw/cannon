@@ -31,17 +31,7 @@ const nativeImport = new Function('specifier', 'return import(specifier)') as (s
 
 async function importModule(file: string): Promise<unknown> {
   if (/\.mjs$/i.test(file)) {
-    try {
-      return await nativeImport(pathToFileURL(file).href);
-    } catch (e) {
-      // Only jest's vm sandbox (run without --experimental-vm-modules) refuses a dynamic import; there Node's own
-      // require(esm) (node >= 20.19 / 22.12) loads the same file. The built CLI never takes this branch.
-      if ((e as { code?: string }).code !== 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG') throw e;
-      const real = (process as unknown as { getBuiltinModule(id: string): typeof import('node:module') }).getBuiltinModule(
-        'node:module'
-      );
-      return real.createRequire(file)(file);
-    }
+    return nativeImport(pathToFileURL(file).href);
   }
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   return require(file);
