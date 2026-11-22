@@ -1,3 +1,4 @@
+import { Console } from 'node:console';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -93,6 +94,47 @@ describe('plan() orchestration', () => {
     expect(parsed).toMatchObject({ version: 1, package: 'plan-test:1.0.0@main', chainId: CHAIN_ID });
     expect(parsed.block).toBe(report.block);
     expect(printed()).not.toContain('# cannon plan');
+  });
+
+  it('--json: what prints to stdout during the run goes to stderr, so stdout is the report alone', async () => {
+    const b = await buildFixtureRecord(url, def('plan-json-noisy'));
+    const stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // a Node console on process.stdout, the way the registry prints its offline warning (`log` in util/console.ts)
+    const noisy = new Console({ stdout: process.stdout, stderr: process.stderr });
+    const write = process.stdout.write;
+    const load = loaded(b);
+    await plan(options({ json: true }), {
+      loadRecord: async () => {
+        noisy.log('warning: offline, local registry only');
+        return load();
+      },
+    });
+
+    expect(JSON.parse(printed())).toMatchObject({ version: 1, package: 'plan-test:1.0.0@main' });
+    expect(stderr.mock.calls.map((c) => String(c[0]))).toEqual(['warning: offline, local registry only\n']);
+    expect(process.stdout.write).toBe(write);
+  });
+
+  it('--json: stdout is put back when the run fails', async () => {
+    const b = await buildFixtureRecord(url, def('plan-json-fails'));
+    const write = process.stdout.write;
+    await expect(plan(options({ json: true }), { loadRecord: loaded(b, { chainId: 1 }) })).rejects.toThrow('chain 1');
+    expect(process.stdout.write).toBe(write);
+    process.stdout.write('after the run\n');
+    expect(printed()).toBe('after the run\n');
+  });
+
+  it('a markdown run leaves stdout alone', async () => {
+    const b = await buildFixtureRecord(url, def('plan-md-noisy'));
+    const noisy = new Console({ stdout: process.stdout, stderr: process.stderr });
+    const load = loaded(b);
+    await plan(options(), {
+      loadRecord: async () => {
+        noisy.log('a note');
+        return load();
+      },
+    });
+    expect(printed()).toMatch(/^a note\n# cannon plan — /);
   });
 
   it('a removed step whose effect is live: drift, explained, conflicting orphan, exit 2', async () => {
@@ -223,6 +265,55 @@ describe('plan() orchestration', () => {
     expect(report.steps.map((s) => s.order)).toEqual([0, 1, 2, 3]);
   });
 
+  it('a failing enumeration is one error row; the other enumerations and the report stand', async () => {
+    const b = await buildFixtureRecord(url, def('plan-enum-fail'));
+    const hints = path.join(tmp, 'hints-enum-fail.cjs');
+    await fs.writeFile(
+      hints,
+      `module.exports = { enumerations: [
+        async () => { throw new Error('rate limited'); },
+        async () => 'not rows',
+        async () => [null],
+        async () => [{ pkg: 'root', step: 'enum.good', kind: 'enum', status: 'unchecked' }],
+      ] };`
+    );
+
+    const { report, exitCode } = await plan(options({ hints }), { loadRecord: loaded(b) });
+
+    expect(report.steps.slice(2)).toEqual([
+      {
+        pkg: 'plan-test:1.0.0@main',
+        step: '(enumeration 0)',
+        kind: 'enumeration',
+        status: 'error',
+        order: 2,
+        detail: 'rate limited',
+      },
+      {
+        pkg: 'plan-test:1.0.0@main',
+        step: '(enumeration 1)',
+        kind: 'enumeration',
+        status: 'error',
+        order: 3,
+        detail: 'an enumeration must return an array of rows',
+      },
+      {
+        pkg: 'plan-test:1.0.0@main',
+        step: '(enumeration 2)',
+        kind: 'enumeration',
+        status: 'error',
+        order: 4,
+        detail: 'an enumeration must return an array of rows',
+      },
+      { pkg: 'root', step: 'enum.good', kind: 'enum', status: 'unchecked', order: 5 },
+    ]);
+    expect(report.steps.slice(0, 2).map((s) => [s.step, s.status])).toEqual([
+      ['deploy.fixture', 'in-sync'],
+      ['invoke.setValue', 'in-sync'],
+    ]);
+    expect(exitCode).toBe(0);
+  });
+
   it('--no-bytecode drops the bytecode row', async () => {
     const b = await buildFixtureRecord(url, def('plan-flags'));
     const { report } = await plan(options({ bytecode: false }), { loadRecord: loaded(b) });
@@ -258,7 +349,43 @@ describe('plan() orchestration', () => {
     account.mockClear();
 
     await plan(options(), { loadRecord: loaded(b) });
+    expect(wallet).not.toHaveBeenCalled();
+    expect(account).not.toHaveBeenCalled();
 
+    // the cannonfile (pending runtime) and hints (their reads) paths create no signer either
+    const storage = fixtureStorage();
+    const withFile = await buildFixtureRecord(url, def('plan-readonly-file'), storage);
+    const file = path.join(tmp, 'readonly.toml');
+    await fs.writeFile(
+      file,
+      [
+        'name = "plan-readonly-file"',
+        'version = "1.0.0"',
+        '[deploy.fixture]',
+        'artifact = "PlanFixture"',
+        `args = ["${OWNER}"]`,
+        '[invoke.setValue]',
+        'target = ["fixture"]',
+        'func = "setValue"',
+        'args = ["43"]',
+        '',
+      ].join('\n')
+    );
+    const hints = path.join(tmp, 'readonly-hints.cjs');
+    await fs.writeFile(
+      hints,
+      `module.exports = {
+        checks: { setValue: async ({ read, address }) => { await read(address, 'getValue() view returns (uint256)', []); return null; } },
+        enumerations: [async ({ results, read }) => { await read(results[0].target.address, 'getValue() view returns (uint256)', []); return []; }],
+      };`
+    );
+    wallet.mockClear();
+    account.mockClear();
+    const run = await plan(options({ cannonfile: file, hints }), {
+      loadRecord: loaded(withFile),
+      storage: { registry: storage.registry, loaders: { ipfs: storage.loader } },
+    });
+    expect(run.report.pending).toEqual([{ step: 'invoke.setValue', change: 'changed' }]);
     expect(wallet).not.toHaveBeenCalled();
     expect(account).not.toHaveBeenCalled();
     const flags = (commandsConfig.plan.options ?? []).map((o) => o.flags);
