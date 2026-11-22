@@ -25,6 +25,11 @@ describe('normalize', () => {
     expect(normalize('1e3', { type: 'uint256' })).toBe('1000');
   });
 
+  it('parses a hex string containing e exactly, not as exponent notation', () => {
+    const hex = '0xfffffffffffffffffffffffffffffffe';
+    expect(normalize(hex, { type: 'uint256' })).toBe(BigInt(hex).toString());
+  });
+
   it('returns a marker for an unparseable int instead of throwing', () => {
     expect(normalize('abc', { type: 'uint256' })).toBe('<bad int abc>');
   });

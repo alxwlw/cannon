@@ -51,7 +51,7 @@ export function normalize(value: unknown, param: viem.AbiParameter): unknown {
   if (/^u?int/.test(t)) {
     try {
       const v =
-        typeof value === 'string' && value.includes('e')
+        typeof value === 'string' && /^[+-]?\d+(\.\d+)?[eE][+-]?\d+$/.test(value)
           ? Number(value).toLocaleString('fullwide', { useGrouping: false })
           : (value as string | number | bigint);
       return BigInt(v).toString();

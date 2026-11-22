@@ -248,3 +248,48 @@ describe('deriveCheck null cases', () => {
     expect(plain(derive('setFoo', a)).getter.name).toBe('getFoo');
   });
 });
+
+describe('deriveCheck prefixes', () => {
+  it.each([
+    ['add', 'addFoo', 'contains'],
+    ['addTo', 'addToFoo', 'contains'],
+    ['remove', 'removeFoo', 'notContains'],
+    ['removeFrom', 'removeFromFoo', 'notContains'],
+  ])('%s prefix', (_p, setter, compare) => {
+    const a = abi(`function ${setter}(address a)`, 'function getFoo() view returns (address[])');
+    expect(plain(derive(setter, a))).toMatchObject({ compare, keyIdx: [], valueIdx: [0] });
+  });
+
+  it.each(['create', 'register', 'init', 'initOrUpgrade'])('%s prefix maps to the bare stem', (prefix) => {
+    const setter = `${prefix}Foo`;
+    const a = abi(`function ${setter}(uint256 v)`, 'function getFoo() view returns (uint256)');
+    expect(plain(derive(setter, a)).getter.name).toBe('getFoo');
+  });
+});
+
+describe('deriveCheck contains does not fall through to equal rules', () => {
+  it('addToX with a scalar getter derives nothing', () => {
+    const a = abi('function addToX(address a)', 'function getX() view returns (address)');
+    expect(derive('addToX', a)).toBeNull();
+  });
+});
+
+describe('deriveCheck structKeyed key fallback', () => {
+  it('finds a key field unique by type when names differ', () => {
+    const a = abi(
+      'struct C { uint128 rate; address who; }',
+      'function configureThing(C c)',
+      'function getThingConfiguration(address k) view returns (C)'
+    );
+    expect(derive('configureThing', a)).toMatchObject({ rule: 'auto:equal/structKeyed', keyFields: [1] });
+  });
+
+  it('derives nothing when the key type is ambiguous in the struct', () => {
+    const a = abi(
+      'struct C { uint128 a; uint128 b; }',
+      'function configureThing(C c)',
+      'function getThingConfiguration(uint128 k) view returns (C)'
+    );
+    expect(derive('configureThing', a)).toBeNull();
+  });
+});

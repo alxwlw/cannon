@@ -27,7 +27,7 @@ function stemOf(name: string): { mode: 'contains' | 'notContains' | 'equal' | 'f
   if ((m = name.match(/^(addTo|add)([A-Z].*)$/))) return { mode: 'contains', stem: m[2] };
   if ((m = name.match(/^(removeFrom|remove)([A-Z].*)$/))) return { mode: 'notContains', stem: m[2] };
   if ((m = name.match(/^(set|update|configure)([A-Z].*)$/))) return { mode: 'equal', stem: m[2] };
-  if ((m = name.match(/^(create|register|init|initOrUpgrade)([A-Z].*)$/))) return { mode: 'fields', stem: m[2] };
+  if ((m = name.match(/^(create|register|initOrUpgrade|init)([A-Z].*)$/))) return { mode: 'fields', stem: m[2] };
   return null;
 }
 
