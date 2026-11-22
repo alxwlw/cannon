@@ -80,6 +80,78 @@ Options:
 
 Package reference: `<name>:<version>@<preset>`
 
+## Plan Command
+
+```bash
+cannon plan <package-reference> --rpc-url <url> [options]
+```
+
+Read-only: checks a deployed package against the live chain and, with `--cannonfile`, lists what the next build would
+change. It creates no signer, and every check reads one block, fixed at the start.
+
+Options:
+- `--rpc-url <url>` — RPC endpoint of the chain to check (required)
+- `--chain-id <id>` — Chain ID of the variant to check
+- `--cannonfile <path>` — Cannonfile to compare with the deployed record: the steps a build would add, change or remove
+- `--hints <file>` — Hints module (CommonJS, or ESM as `.mjs`), see below
+- `--block <number>` — Block to read every check at (default: the latest block); not above the head
+- `--depth <number>` — Levels of cloned packages to walk into (default: all); a clone past it is one `unchecked` row
+- `--no-bytecode` — Skip the deployed bytecode checks
+- `--out <dir>` — Also write `plan.json` and `plan.md` into this directory
+- `--json` — Print the report as JSON instead of Markdown
+
+Exit codes:
+- `0` — nothing drifted and nothing is pending; `unchecked`, `skipped`, `error` and `may-change` rows, and orphans
+  that conflict with no declared step, keep 0
+- `2` — a drift, an orphan whose effect explains a declared step's drift, or a step the cannonfile adds, changes or removes
+- `1` — the run failed: bad options, an RPC on another chain, a record, registry or block that cannot be read
+
+With `--cannonfile`, a step whose state cannot be computed (an artifact the record lacks, a module not deployed yet)
+is judged by its config: configured otherwise than recorded (`depends` aside) it is `changed`, the same config below
+an added or changed step is `may-change`, and the same config with nothing upstream (a registry lookup that failed)
+fails the run.
+
+What is checked:
+- each `invoke` step: the getter derived from the setter by name and types (`setX(v)` → `getX()` or `x()`,
+  `addToX(m)` → `m` in `getX()`), or a hint for that setter; a value the contract changed and announced in the last
+  argument of a recorded event counts as in sync
+- the deployed bytecode of `deploy`, `router` and `diamond` contracts against the recorded artifact
+- steps kept in the record but no longer in its definition (orphans), and the packages it cloned, up to `--depth`
+- a pulled package is someone else's deployment: its `pull` step is one `unchecked` row, and it is not walked
+
+Hints module:
+
+```js
+// hints.cjs
+module.exports = {
+  // keyed by setter function name; return null and the automatic rule runs
+  checks: {
+    async setThreshold({ step, setter, args, address, abi, events, read }) {
+      // args are ABI-decoded: bigint, checksummed address, boolean, tuple object
+      const live = await read(address, 'function threshold() view returns (uint256)', []);
+      return {
+        status: live === args[0] ? 'in-sync' : 'drift',
+        getter: 'threshold',
+        expected: args[0],
+        actual: live,
+        slot: { address, getter: 'threshold', keys: '[]' },
+      };
+    },
+  },
+  // steps never checked: names or RegExps
+  skip: ['invoke.initialize', /^invoke\.legacy/],
+  // each sees the walked rows and the same pinned `read`, and returns more report rows
+  enumerations: [async ({ results, read }) => []],
+};
+```
+
+- `expected` and `actual` are kept in one shape: a bigint becomes its decimal string, a 20-byte hex string is
+  checksummed, any other hex string is lower case, arrays and plain objects element by element.
+- `slot.keys` is a string that must identify exactly one value (for example the JSON of the key arguments): rows of one
+  slot are linked, so an earlier drift is superseded and an orphan that wrote the live value explains the drift.
+- A check that throws makes its row `error`; an enumeration that throws, or returns anything but an array of rows, is
+  one `(enumeration <i>)` row with status `error`.
+
 ## Publish Command
 
 ```bash
