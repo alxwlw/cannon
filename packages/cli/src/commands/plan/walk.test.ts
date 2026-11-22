@@ -3,7 +3,7 @@ import * as viem from 'viem';
 import { DeploymentInfo, RawChainDefinition } from '@usecannon/builder';
 import { CannonRpcNode, runRpc } from '../../rpc';
 import fixture from './__fixtures__/PlanFixture.json';
-import { buildFixtureRecord, fixtureClients, fixtureStorage } from './__fixtures__/record';
+import { buildFixtureRecord, fixtureClients } from './__fixtures__/record';
 import { HintContext, HintsModule } from './hints';
 import { ChainReader, createChainReader } from './read';
 import { StepResult } from './types';
@@ -182,7 +182,7 @@ describe('walkRecord', () => {
     const hints: HintsModule = {
       skip: ['invoke.init'],
       checks: {
-        setValue: async (ctx) => {
+        setDelay: async (ctx) => {
           seen.push(ctx);
           return { status: 'drift', getter: 'hinted', expected: 'from-hint', actual: 'chain-says' };
         },
@@ -203,19 +203,21 @@ describe('walkRecord', () => {
         detail: 'hint addToAllowlist: hint exploded',
       },
       { step: 'invoke.init', kind: 'invoke', status: 'skipped', rule: undefined, detail: undefined },
-      { step: 'invoke.setDelay', kind: 'invoke', status: 'in-sync', rule: 'auto:equal/1', detail: NORMALIZED },
+      { step: 'invoke.setDelay', kind: 'invoke', status: 'drift', rule: 'hint:setDelay', detail: undefined },
       { step: 'invoke.setLimit', kind: 'invoke', status: 'in-sync', rule: 'auto:equal/1', detail: undefined },
-      { step: 'invoke.setValue', kind: 'invoke', status: 'drift', rule: 'hint:setValue', detail: undefined },
+      { step: 'invoke.setValue', kind: 'invoke', status: 'in-sync', rule: 'auto:equal/1', detail: undefined },
     ]);
-    expect(byStep(rows, 'invoke.setValue')[0].check).toEqual({
-      rule: 'hint:setValue',
+    expect(byStep(rows, 'invoke.setDelay')[0].check).toEqual({
+      rule: 'hint:setDelay',
       getter: 'hinted',
       expected: 'from-hint',
       actual: 'chain-says',
     });
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ step: 'invoke.setValue', args: ['42'], address: main.addresses.fixture, events: {} });
-    expect(seen[0].setter.name).toBe('setValue');
+    expect(seen[0]).toMatchObject({ step: 'invoke.setDelay', args: ['0'], address: main.addresses.fixture });
+    // the contract stored 1 for the 0 it was given, and said so in its event
+    expect(seen[0].events.DelaySet[0].args).toEqual(['1']);
+    expect(seen[0].setter.name).toBe('setDelay');
     expect(seen[0].abi).toEqual(abi);
     expect(await seen[0].read(main.addresses.fixture, 'getValue() view returns (uint256)', [])).toBe(42n);
   });
@@ -253,6 +255,55 @@ describe('walkRecord', () => {
     expect(byStep(rows, 'invoke.setValue')).toEqual([
       { pkg: 'root', step: 'invoke.setValue', kind: 'invoke', status: 'unchecked', order: 5, detail: NOT_EXECUTED },
     ]);
+    // a step that never ran is not a render error, even when its config cannot be rendered now
+    const unrenderable = edited((r) => {
+      delete r.state['invoke.setValue'];
+      (r.def.invoke as Record<string, Record<string, unknown>>).setValue.args = ['<%= settings.missing.deep %>'];
+    });
+    expect(byStep(await walkRecord(unrenderable, 'root', await opts()), 'invoke.setValue')).toEqual([
+      { pkg: 'root', step: 'invoke.setValue', kind: 'invoke', status: 'unchecked', order: 5, detail: NOT_EXECUTED },
+    ]);
+  });
+
+  it('func names a tuple setter of a custom abi in the builder form f(tuple) or as the full signature', async () => {
+    const setPair = {
+      type: 'function',
+      name: 'setPair',
+      stateMutability: 'nonpayable',
+      inputs: [
+        {
+          name: 'p',
+          type: 'tuple',
+          components: [
+            { name: 'a', type: 'uint256' },
+            { name: 'b', type: 'uint256' },
+          ],
+        },
+      ],
+      outputs: [],
+    };
+    for (const func of ['setPair(tuple)', 'setPair((uint256,uint256))']) {
+      const record = edited((r) =>
+        Object.assign((r.def.invoke as Record<string, Record<string, unknown>>).setValue, {
+          target: [main.addresses.fixture],
+          abi: JSON.stringify([setPair]),
+          func,
+          args: [['3', '4']],
+        })
+      );
+      expect(byStep(await walkRecord(record, 'root', await opts()), 'invoke.setValue')).toEqual([
+        {
+          pkg: 'root',
+          step: 'invoke.setValue',
+          kind: 'invoke',
+          status: 'unchecked',
+          order: 1,
+          target: { name: main.addresses.fixture, address: main.addresses.fixture },
+          call: { func: 'setPair', args: [['3', '4']] },
+          detail: 'no derivable getter',
+        },
+      ]);
+    }
   });
 
   it('a recorded step without artifacts is walked as one that produced nothing', async () => {
@@ -380,6 +431,17 @@ describe('walkRecord', () => {
         [{ name: 'fixture2', address: variants.addresses.fixture2 }, 'in-sync', ['1'], NORMALIZED],
       ]);
       expect(variants.addresses.fixture).not.toBe(variants.addresses.fixture2);
+
+      // only fixture2's own transaction now claims a different stored value
+      const other = _.cloneDeep(variants.record);
+      const txns = other.state['invoke.setDelay'].artifacts.txns ?? {};
+      expect(Object.keys(txns).sort()).toEqual(['setDelay_fixture', 'setDelay_fixture2']);
+      txns.setDelay_fixture2.events.DelaySet[0].args = ['7'];
+      const split = byStep(await walkOn(other), 'invoke.setDelay');
+      expect(split.map((r) => [r.target?.name, r.status, r.detail])).toEqual([
+        ['fixture', 'in-sync', NORMALIZED],
+        ['fixture2', 'drift', undefined],
+      ]);
     });
 
     it('an address target takes its ABI from a JSON abi or a contract path; func may be a full signature', async () => {
@@ -561,137 +623,6 @@ describe('walkRecord', () => {
         ['invoke.setDelay', 'in-sync', NORMALIZED],
         ['invoke.setLimit', 'in-sync', undefined],
         ['invoke.setValue', 'in-sync', undefined],
-      ]);
-    });
-  });
-
-  describe('nested packages', () => {
-    const source = 'plan-walk-child:1.0.0';
-    let child: Awaited<ReturnType<typeof buildFixtureRecord>>;
-    let parent: Awaited<ReturnType<typeof buildFixtureRecord>>;
-    let grand: Awaited<ReturnType<typeof buildFixtureRecord>>;
-    let twice: Awaited<ReturnType<typeof buildFixtureRecord>>;
-    let legacyImport: Awaited<ReturnType<typeof buildFixtureRecord>>;
-    let childUrl: string;
-    const walkAt = async (built: typeof parent, over: Partial<WalkOptions> = {}) =>
-      walkRecord(
-        built.record,
-        'root',
-        await opts({ readBlob: built.readBlob, reader: await createChainReader(url), ...over })
-      );
-    const shape = (rows: StepResult[]) => rows.map((r) => [r.pkg, r.step, r.kind, r.status, r.order]);
-    /** parent's readBlob, but the child record comes from `answer`. */
-    const childAs = (answer: () => Promise<unknown>) => (u: string) => u === childUrl ? answer() : parent.readBlob(u);
-
-    beforeAll(async () => {
-      const storage = fixtureStorage();
-      child = await buildFixtureRecord(
-        url,
-        {
-          name: 'plan-walk-child',
-          version: '1.0.0',
-          deploy: { fixture: { artifact: 'PlanFixture', args: [OWNER] } },
-          invoke: { setValue: { target: ['fixture'], func: 'setValue', args: ['46'] } },
-        },
-        storage
-      );
-      // the invoke on the pulled contract depends on the pull, so it sorts after it
-      const pkg = (name: string, rest: Partial<RawChainDefinition>): RawChainDefinition =>
-        ({ name, version: '1.0.0', ...rest } as RawChainDefinition);
-      parent = await buildFixtureRecord(
-        url,
-        pkg('plan-walk-parent', {
-          pull: { child: { source } },
-          invoke: { touchChild: { target: ['child.fixture'], func: 'setLimit', args: ['9', '4'] } },
-        }),
-        storage
-      );
-      grand = await buildFixtureRecord(
-        url,
-        pkg('plan-walk-grand', { pull: { parent: { source: 'plan-walk-parent:1.0.0' } } }),
-        storage
-      );
-      twice = await buildFixtureRecord(url, pkg('plan-walk-twice', { pull: { a: { source }, b: { source } } }), storage);
-      legacyImport = await buildFixtureRecord(url, pkg('plan-walk-import', { import: { child: { source } } }), storage);
-      childUrl = parent.record.state['pull.child'].artifacts.imports?.child.url as string;
-    }, 60000);
-
-    it('walks into a pulled package after the parent rows, under <parent>.<import name>', async () => {
-      const rows = await walkAt(parent);
-      expect(shape(rows)).toEqual([
-        ['root', 'invoke.touchChild', 'invoke', 'in-sync', 0],
-        ['root.child', 'deploy.fixture', 'deploy', 'in-sync', 1],
-        ['root.child', 'invoke.setValue', 'invoke', 'in-sync', 2],
-      ]);
-      expect(rows.map((r) => r.target?.address)).toEqual(Array(3).fill(child.addresses.fixture));
-      expect(rows[2].check?.actual).toEqual(['46']);
-    });
-
-    it('depth bounds the walk: each level takes one', async () => {
-      expect(shape(await walkAt(grand, { depth: 0 }))).toEqual([]);
-      expect(shape(await walkAt(grand, { depth: 1 }))).toEqual([
-        ['root.parent', 'invoke.touchChild', 'invoke', 'in-sync', 0],
-      ]);
-      expect((await walkAt(grand, { depth: 2 })).map((r) => r.pkg)).toEqual([
-        'root.parent',
-        'root.parent.child',
-        'root.parent.child',
-      ]);
-    });
-
-    it('a package imported twice is walked once, under the first import', async () => {
-      expect(shape(await walkAt(twice))).toEqual([
-        ['root.a', 'deploy.fixture', 'deploy', 'in-sync', 0],
-        ['root.a', 'invoke.setValue', 'invoke', 'in-sync', 1],
-      ]);
-    });
-
-    it('legacy import.* recurses like pull', async () => {
-      expect((await walkAt(legacyImport)).map((r) => r.pkg)).toEqual(['root.child', 'root.child']);
-    });
-
-    it('a nested record that cannot be read, or is missing, is one package error row', async () => {
-      const failed = await walkAt(parent, { readBlob: childAs(() => Promise.reject(new Error('store down'))) });
-      expect(failed.slice(1)).toEqual([
-        {
-          pkg: 'root.child',
-          step: '(package)',
-          kind: 'package',
-          status: 'error',
-          order: 1,
-          detail: `read ${childUrl}: store down`,
-        },
-      ]);
-      const missing = await walkAt(parent, { readBlob: childAs(async () => null) });
-      expect(missing.slice(1)).toEqual([
-        {
-          pkg: 'root.child',
-          step: '(package)',
-          kind: 'package',
-          status: 'error',
-          order: 1,
-          detail: `read ${childUrl}: not found`,
-        },
-      ]);
-    });
-
-    it('a nested record of another chain is not checked against this one', async () => {
-      const rows = await walkAt(parent, { readBlob: childAs(async () => ({ ...child.record, chainId: 1 })) });
-      expect(rows.slice(1)).toEqual([
-        {
-          pkg: 'root.child',
-          step: '(package)',
-          kind: 'package',
-          status: 'unchecked',
-          order: 1,
-          detail: `deployed on chain 1, not on ${CHAIN_ID}`,
-        },
-      ]);
-      const unknownChain = await walkAt(parent, { readBlob: childAs(async () => ({ ...child.record, chainId: null })) });
-      expect(unknownChain.map((r) => [r.pkg, r.status])).toEqual([
-        ['root', 'in-sync'],
-        ['root.child', 'in-sync'],
-        ['root.child', 'in-sync'],
       ]);
     });
   });

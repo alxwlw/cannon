@@ -3,13 +3,14 @@ import * as viem from 'viem';
 import { mnemonicToAccount } from 'viem/accounts';
 import {
   build,
+  CannonLoader,
   CannonSigner,
   ChainBuilderRuntime,
   ChainDefinition,
   ContractArtifact,
   createInitialContext,
   DeploymentInfo,
-  InMemoryLoader,
+  getContentUrl,
   InMemoryRegistry,
   RawChainDefinition,
 } from '@usecannon/builder';
@@ -19,14 +20,38 @@ import fixture from './PlanFixture.json';
 // `cannon plan` never signs; only these fixtures do, to build a record and to change chain state under a test.
 export const FIXTURE_ACCOUNT = mnemonicToAccount('test test test test test test test test test test test junk');
 
+/**
+ * An in-memory blob store whose URLs are the `ipfs://` content ids an IPFS node would return. The builder's
+ * `InMemoryLoader` returns `mem://` URLs, and `clone` refuses those: it checks the misc URL it computes with
+ * `getContentUrl` against the URL the store returns.
+ */
+export class ContentLoader implements CannonLoader {
+  private readonly blobs = new Map<string, string>();
+
+  getLabel() {
+    return 'fixture memory';
+  }
+
+  async read(url: string) {
+    const blob = this.blobs.get(url);
+    return blob === undefined ? null : JSON.parse(blob);
+  }
+
+  async put(misc: unknown) {
+    const url = await getContentUrl(misc);
+    if (url) this.blobs.set(url, JSON.stringify(misc));
+    return url;
+  }
+}
+
 /** Registry and blob store shared by several builds, so one fixture package can `pull` or `clone` another. */
 export interface FixtureStorage {
   registry: InMemoryRegistry;
-  loader: InMemoryLoader;
+  loader: ContentLoader;
 }
 
 export function fixtureStorage(): FixtureStorage {
-  return { registry: new InMemoryRegistry(), loader: new InMemoryLoader(1) };
+  return { registry: new InMemoryRegistry(), loader: new ContentLoader() };
 }
 
 /**
@@ -87,8 +112,8 @@ export async function buildFixtureRecord(
       },
     },
     storage.registry,
-    { mem: storage.loader },
-    'mem'
+    { ipfs: storage.loader },
+    'ipfs'
   );
 
   const def = new ChainDefinition(rawDef);
@@ -96,20 +121,23 @@ export async function buildFixtureRecord(
   const miscUrl = await runtime.recordMisc();
   if (!miscUrl) throw new Error('fixture misc was not stored');
 
-  const record: DeploymentInfo = {
+  const url = await runtime.putDeploy({
     generator: 'cannon plan-fixture',
     timestamp: Math.floor(Date.now() / 1000),
-    def: _.cloneDeep(rawDef),
+    def: rawDef,
     options: {},
     status: 'complete',
     state,
     meta: {},
     miscUrl,
     chainId,
-  };
-  const url = await runtime.putDeploy(record);
+  });
   if (!url) throw new Error('fixture record was not stored');
   await storage.registry.publish([`${rawDef.name}:${rawDef.version}@${rawDef.preset ?? 'main'}`], chainId, url);
+  // the record as a reader loads it: stored as JSON, so event arguments are decimal strings, not the bigints of
+  // the in-memory state `build()` returned
+  const record: DeploymentInfo | null = await runtime.readBlob(url);
+  if (!record) throw new Error('fixture record cannot be read back');
 
   const addresses: Record<string, viem.Address> = {};
   for (const step of Object.values(state)) {

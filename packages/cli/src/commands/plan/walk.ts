@@ -24,7 +24,7 @@ export interface WalkOptions {
   reader: ChainReader;
   readBlob: (url: string) => Promise<any>;
   hints: HintsModule;
-  /** How many levels of nested packages (`clone`/`pull` imports) to walk into. */
+  /** How many levels of nested packages (`clone` imports) to walk into. */
   depth: number;
   /** false: no deployed bytecode rows, and the package's misc blob is never read. */
   bytecode: boolean;
@@ -67,8 +67,9 @@ function findSetter(abi: viem.Abi, func: string): viem.AbiFunction | undefined {
 }
 
 /**
- * Checks every step of a deployment record against the chain the reader is pinned to, and walks into nested
- * packages. Never throws because of one step: a step that cannot be rendered or checked is an `error` row.
+ * Checks every step of a deployment record against the chain the reader is pinned to, and walks into the packages
+ * it cloned. A pulled package is someone else's deployment: it is neither walked nor checked.
+ * Never throws because of one step: a step that cannot be rendered or checked is an `error` row.
  * `order` is the index in the returned array; rows of nested packages follow their parent's.
  */
 export async function walkRecord(record: DeploymentInfo, pkgPath: string, opts: WalkOptions): Promise<StepResult[]> {
@@ -138,11 +139,12 @@ async function walkPackage(
 
     if (kind === 'invoke') {
       rows.push(...(await checkInvoke(n, cfg, ctx, own.txns ?? {})));
-    } else if (kind === 'clone' || kind === 'pull') {
+    } else if (kind === 'clone') {
       if (depth > 0) {
         for (const [name, imp] of Object.entries(own.imports ?? {})) if (imp?.url) nested.push({ name, url: imp.url });
       }
-    } else if (opts.bytecode) {
+    } else if (kind !== 'pull' && opts.bytecode) {
+      // not `pull`: a pulled package is someone else's deployment, its drift is not this package's (no rows, no walk)
       for (const [name, c] of Object.entries(own.contracts ?? {})) rows.push(await checkCode(n, name, c));
     }
   }
@@ -183,7 +185,7 @@ async function walkPackage(
       fail(`read ${url}: not found`);
       continue;
     }
-    // a `pull` may import a package of another chain: its addresses mean nothing on this one
+    // `clone` builds on this chain, so only a foreign or edited record lands here: its addresses mean nothing on this one
     if (typeof child.chainId === 'number' && child.chainId !== opts.chainId) {
       rows.push({
         pkg: sub,
