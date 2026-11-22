@@ -1,5 +1,5 @@
 import * as viem from 'viem';
-import { normalize, sameValue } from './normalize';
+import { canonicalValue, normalize, sameValue } from './normalize';
 
 const lower = '0x52908400098527886e0f7030069857d2e4169ee7';
 const checksummed = '0x52908400098527886E0F7030069857D2E4169EE7';
@@ -108,5 +108,29 @@ describe('sameValue', () => {
   it('is false for different values', () => {
     expect(sameValue(normalize(1n, { type: 'uint256' }), normalize(2n, { type: 'uint256' }))).toBe(false);
     expect(sameValue(['1'], ['1', '2'])).toBe(false);
+  });
+
+  it('never throws on a bigint: it equals its decimal string, and only that', () => {
+    expect(sameValue(7n, 7n)).toBe(true);
+    expect(sameValue([7n, { v: 9n }], ['7', { v: '9' }])).toBe(true);
+    expect(sameValue(7n, 8n)).toBe(false);
+    expect(sameValue(7n, 7)).toBe(false);
+  });
+});
+
+describe('canonicalValue', () => {
+  it('bigints to decimal strings, addresses checksummed, other hex lower case, nested arrays and plain objects', () => {
+    expect(canonicalValue({ a: [7n, lower], b: { c: '0xABCD', d: 'Text 0xAB' }, e: 3, f: true, g: null })).toEqual({
+      a: ['7', checksummed],
+      b: { c: '0xabcd', d: 'Text 0xAB' },
+      e: 3,
+      f: true,
+      g: null,
+    });
+  });
+
+  it('keeps an instance of a class as returned', () => {
+    const when = new Date(0);
+    expect((canonicalValue([when]) as unknown[])[0]).toBe(when);
   });
 });

@@ -65,6 +65,32 @@ describe('checkSetter', () => {
   });
 });
 
+describe('checkSetter: a hint outcome where it enters', () => {
+  it('is canonical: bigints as decimal strings, addresses and the slot address checksummed', async () => {
+    const lower = MEMBER.toLowerCase() as viem.Address;
+    const hint = async (): Promise<CheckOutcome> => ({
+      status: 'drift',
+      getter: 'getMember',
+      expected: [7n, lower],
+      actual: { amount: 9n, who: lower, flags: [true] },
+      slot: { address: lower, getter: 'getMember', keys: '["1"]' },
+      detail: 'from the hint',
+    });
+    expect(await checkSetter(call({ hints: { checks: { toString: hint } } }))).toEqual({
+      status: 'checked',
+      rule: 'hint:toString',
+      outcome: {
+        status: 'drift',
+        getter: 'getMember',
+        expected: ['7', MEMBER],
+        actual: { amount: '9', who: MEMBER, flags: [true] },
+        slot: { address: MEMBER, getter: 'getMember', keys: '["1"]' },
+        detail: 'from the hint',
+      },
+    });
+  });
+});
+
 describe('kindOf', () => {
   it('maps legacy action names and passes the rest through, prototype names included', () => {
     expect(['contract.a', 'provision.b', 'import.c', 'invoke.d', 'toString.e', 'constructor.f'].map(kindOf)).toEqual([

@@ -2,6 +2,7 @@ import * as viem from 'viem';
 import { RecordedEvents, runCheck, shortError } from './check';
 import { deriveCheck } from './derive';
 import { HintsModule, makeRead } from './hints';
+import { canonicalValue } from './normalize';
 import { ChainReader } from './read';
 import { CheckOutcome, StepResult } from './types';
 
@@ -33,6 +34,16 @@ export function decodeArgs(setter: viem.AbiFunction, args: readonly unknown[]): 
   return viem.decodeFunctionData({ abi, data }).args ?? [];
 }
 
+/** A hint outcome where it enters the report: values in the canonical shape (`canonicalValue`), slot address checksummed. */
+function canonicalOutcome(o: CheckOutcome): CheckOutcome {
+  return {
+    ...o,
+    expected: canonicalValue(o.expected),
+    actual: canonicalValue(o.actual),
+    ...(o.slot ? { slot: { ...o.slot, address: canonicalValue(o.slot.address) as viem.Address } } : {}),
+  };
+}
+
 /**
  * Checks one setter call, for a declared step and an orphan alike. Precedence: a hint for the setter (a `null`
  * outcome falls through), then the getter derived from the ABI, else nothing to compare.
@@ -56,7 +67,7 @@ export async function checkSetter(c: SetterCall): Promise<SetterVerdict> {
     } catch (e) {
       return { status: 'error', detail: `hint ${name}: ${shortError(e)}` };
     }
-    if (outcome) return { status: 'checked', rule: `hint:${name}`, outcome };
+    if (outcome) return { status: 'checked', rule: `hint:${name}`, outcome: canonicalOutcome(outcome) };
   }
   const check = deriveCheck(c.setter, c.abi);
   if (!check) return { status: 'unchecked', detail: 'no derivable getter' };

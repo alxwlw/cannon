@@ -3,7 +3,7 @@ import { ChainArtifacts, ChainBuilderContext } from '@usecannon/builder';
 import { RecordedEvents, shortError } from './check';
 import { HintsModule, isSkipped } from './hints';
 import { kindOf } from './kind';
-import { sameValue } from './normalize';
+import { bigintReplacer, sameValue } from './normalize';
 import { ChainReader } from './read';
 import { checkFields, checkSetter } from './setter';
 import { Slot, StepResult } from './types';
@@ -123,10 +123,10 @@ const isContainsFamily = (r: StepResult) => r.check?.rule === 'auto:contains' ||
 /** Rows overwrite each other by slot; in a list slot only the same member is the same write. */
 const writeKey = (r: StepResult) =>
   isContainsFamily(r)
-    ? `list|${slotKey(r.slot as Slot)}|${JSON.stringify(r.check?.expected)}`
+    ? `list|${slotKey(r.slot as Slot)}|${JSON.stringify(r.check?.expected, bigintReplacer)}`
     : `value|${slotKey(r.slot as Slot)}`;
 
-const memberText = (m: unknown) => (typeof m === 'string' ? m : JSON.stringify(m));
+const memberText = (m: unknown) => (typeof m === 'string' ? m : JSON.stringify(m, bigintReplacer));
 
 /** Pure: returns new rows in the same order, with superseded slots, orphan links and enumeration rows added. */
 export function linkResults(results: StepResult[]): StepResult[] {

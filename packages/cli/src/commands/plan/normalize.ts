@@ -65,7 +65,31 @@ export function normalize(value: unknown, param: viem.AbiParameter): unknown {
   return String(value);
 }
 
-/** Deep equality of two already normalized values. */
+/** `JSON.stringify` replacer: a bigint becomes its decimal string. */
+export function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value;
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+
+/**
+ * The shape a hint outcome's values are kept in, so that rows of one slot compare equal whatever types a hint
+ * returned: a bigint becomes its decimal string, a 20-byte hex string is checksummed (EIP-55), any other hex string
+ * is lower case, arrays and plain objects are converted element by element; anything else is kept as returned.
+ */
+export function canonicalValue(v: unknown): unknown {
+  if (typeof v === 'bigint') return v.toString();
+  if (typeof v === 'string') {
+    if (/^0x[0-9a-f]{40}$/i.test(v)) return viem.getAddress(v);
+    return /^0x[0-9a-f]*$/i.test(v) ? v.toLowerCase() : v;
+  }
+  if (Array.isArray(v)) return v.map(canonicalValue);
+  if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, canonicalValue(x)]));
+  return v;
+}
+
+/** Deep equality of two already normalized values. Never throws on a bigint: it equals its decimal string. */
 export function sameValue(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(a, bigintReplacer) === JSON.stringify(b, bigintReplacer);
 }

@@ -1,10 +1,7 @@
+import { bigintReplacer } from './normalize';
 import { PendingChange, PlanReport, StepResult } from './types';
 
 const MAX_CELL = 200;
-
-function bigintReplacer(_key: string, value: unknown): unknown {
-  return typeof value === 'bigint' ? value.toString() : value;
-}
 
 export function buildReport(a: {
   pkg: string;

@@ -417,6 +417,23 @@ describe('linkResults: orphans', () => {
     expect(out[1].orphan).toEqual({ effect: 'in-sync', conflicting: true });
   });
 
+  it('links hint rows whose values are bigints without throwing', () => {
+    // a hint that returns read() results directly: bigints on both rows of one slot
+    const S = slotOf('getDelay');
+    const d = declared('invoke.setDelay', {
+      status: 'drift',
+      slot: S,
+      check: { rule: 'hint:setDelay', getter: 'getDelay', expected: 0n, actual: 7n },
+    });
+    const o = orphanRow('invoke.old', {
+      slot: S,
+      check: { rule: 'hint:setDelay', getter: 'getDelay', expected: 7n, actual: 7n },
+    });
+    const out = linkResults([d, o]);
+    expect(out[0].explainedBy).toBe('invoke.old');
+    expect(out[1].orphan).toEqual({ effect: 'in-sync', conflicting: true });
+  });
+
   it('does not explain a drift when the orphan wrote another value', () => {
     const o = orphanRow('invoke.old', {
       slot: slotOf('getDelay'),

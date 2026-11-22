@@ -18,7 +18,14 @@ export interface HintContext {
 }
 
 export interface HintsModule {
-  /** Keyed by setter function name; `null` means "no opinion", the automatic rule runs. */
+  /**
+   * Keyed by setter function name (own keys only); `null` means "no opinion", the automatic rule runs. A check gets
+   * the call's ABI-decoded `args`: bigint, checksummed address, boolean, tuple object. The `expected` and `actual` it
+   * returns are kept in one shape: a bigint becomes its decimal string, a 20-byte hex string is checksummed, any other
+   * hex string is lower case, arrays and plain objects element by element. Return a `slot` whose `keys` (a string)
+   * identifies exactly one value to link the row with other writes of that value: an earlier drift of the same slot
+   * is superseded, and an orphan that wrote the live value explains the drift.
+   */
   checks?: Record<string, (ctx: HintContext) => Promise<CheckOutcome | null>>;
   /** Step names, e.g. 'invoke.initializeThing'. */
   skip?: (string | RegExp)[];
