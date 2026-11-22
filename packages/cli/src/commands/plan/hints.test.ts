@@ -68,7 +68,7 @@ describe('loadHints', () => {
     });
 
     it('rejects enumerations that are not an array of functions', async () => {
-      const f = write('c.cjs', 'module.exports = { enumerations: [1] };');
+      const f = write('c.cjs', 'module.exports = { enumerations: [async () => [], 1] };');
       await expect(loadHints(f)).rejects.toThrow(/: enumerations must be an array of functions/);
     });
 

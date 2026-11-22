@@ -88,9 +88,7 @@ export async function loadHints(file?: string): Promise<HintsModule> {
 }
 
 export function isSkipped(hints: HintsModule, step: string): boolean {
-  return (hints.skip ?? []).some((s) =>
-    typeof s === 'string' ? s === step : new RegExp(s.source, s.flags.replace(/[gy]/g, '')).test(step)
-  );
+  return (hints.skip ?? []).some((s) => (typeof s === 'string' ? s === step : new RegExp(s.source, s.flags).test(step)));
 }
 
 export function makeRead(reader: ChainReader): HintContext['read'] {
