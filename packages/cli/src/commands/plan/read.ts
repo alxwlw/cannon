@@ -1,6 +1,9 @@
 import * as viem from 'viem';
 
-/** The only door to the chain: read-only, and pinned to one block so a whole report describes one state. */
+/**
+ * How every check and hint reads the chain: read-only, and pinned to one block so a whole report describes one
+ * state. (plan() also asks the RPC for its chain id, and the pending runtime has its own public client.)
+ */
 export interface ChainReader {
   readonly blockNumber: bigint;
   call(address: viem.Address, fn: viem.AbiFunction, args: unknown[]): Promise<unknown>;
@@ -12,7 +15,11 @@ export async function createChainReader(rpcUrl: string, opts: { block?: bigint }
   const client = viem.createPublicClient({
     transport: viem.http(rpcUrl, { batch: { batchSize: 40, wait: 20 }, retryCount: 4, timeout: 60000 }),
   });
-  const blockNumber = opts.block ?? (await client.getBlockNumber());
+  const head = await client.getBlockNumber();
+  if (opts.block !== undefined && opts.block > head) {
+    throw new Error(`block ${opts.block} is above the chain head (${head})`);
+  }
+  const blockNumber = opts.block ?? head;
 
   return {
     blockNumber,

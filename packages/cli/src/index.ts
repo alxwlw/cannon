@@ -634,12 +634,23 @@ applyCommandsConfig(program.command('publishers'), commandsConfig.publishers).ac
   }
 });
 
+/** A `cannon plan` option value that counts something: a non-negative safe integer, else a one-line error naming it. */
+function nonNegativeInteger(flag: string, value: string): number {
+  const n = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(n)) {
+    throw new Error(`${flag} must be a non-negative integer, got "${value}"`);
+  }
+  return n;
+}
+
 applyCommandsConfig(program.command('plan'), commandsConfig.plan).action(async function (packageRef, options) {
   try {
     spinner?.update({ text: 'Planning...' });
     const { plan } = await import('./commands/plan');
 
     if (!options.rpcUrl) throw new Error('--rpc-url is required: cannon plan reads the chain it checks against');
+    const block = options.block !== undefined ? BigInt(nonNegativeInteger('--block', options.block)) : undefined;
+    const depth = options.depth !== undefined ? nonNegativeInteger('--depth', options.depth) : undefined;
 
     // the report goes to stdout: nothing of the spinner may share the stream
     logSpinnerEnd();
@@ -649,8 +660,8 @@ applyCommandsConfig(program.command('plan'), commandsConfig.plan).action(async f
       rpcUrl: options.rpcUrl,
       cannonfile: options.cannonfile,
       hints: options.hints,
-      block: options.block !== undefined ? BigInt(options.block) : undefined,
-      depth: options.depth !== undefined ? Number(options.depth) : undefined,
+      block,
+      depth,
       bytecode: options.bytecode !== false,
       out: options.out,
       json: Boolean(options.json),

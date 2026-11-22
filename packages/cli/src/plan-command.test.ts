@@ -78,4 +78,25 @@ describe('cannon plan command', () => {
     await expect(run('pkg:1.0.0')).rejects.toThrow('--rpc-url is required');
     expect(mockPlan).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['--depth', 'abc'],
+    ['--depth', '-1'],
+    ['--depth', '1.5'],
+    ['--depth', ''],
+    ['--block', 'abc'],
+    ['--block', '-5'],
+    ['--block', '0x10'],
+    ['--block', '9007199254740993'],
+  ])('refuses %s %s with a named one-line error, before plan()', async (flag, value) => {
+    await expect(run('pkg:1.0.0', '-n', 'http://rpc.invalid', flag, value)).rejects.toThrow(
+      new Error(`${flag} must be a non-negative integer, got "${value}"`)
+    );
+    expect(mockPlan).not.toHaveBeenCalled();
+  });
+
+  it('accepts 0 for --depth and --block', async () => {
+    await run('pkg:1.0.0', '-n', 'http://rpc.invalid', '--depth', '0', '--block', '0');
+    expect(mockPlan).toHaveBeenCalledWith(expect.objectContaining({ depth: 0, block: 0n }));
+  });
 });

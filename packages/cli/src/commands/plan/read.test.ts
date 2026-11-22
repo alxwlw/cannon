@@ -4,40 +4,44 @@ import { CannonRpcNode, runRpc } from '../../rpc';
 import fixture from './__fixtures__/PlanFixture.json';
 import { createChainReader } from './read';
 
-const PORT = 8591;
 const CHAIN_ID = 13370;
 // anvil's well-known first dev key: test-only, used by this test and never by production code
 const TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 describe('createChainReader', () => {
   let node: CannonRpcNode;
-  const url = `http://127.0.0.1:${PORT}`;
-  const chain = viem.defineChain({
-    id: CHAIN_ID,
-    name: 'local',
-    nativeCurrency: { name: 'E', symbol: 'E', decimals: 18 },
-    rpcUrls: { default: { http: [url] } },
-  });
+  let url: string;
   const account = privateKeyToAccount(TEST_KEY);
-  const wallet = viem.createWalletClient({ account, chain, transport: viem.http(url) });
-  const pub = viem.createPublicClient({ chain, transport: viem.http(url) });
+  // receipt waits poll every 50 ms: viem leaves the last poll's timer running after a receipt resolves, and at the
+  // 4 s default that timer keeps the jest worker alive past teardown
+  let wallet: viem.WalletClient<viem.Transport, viem.Chain, typeof account>;
+  let pub: viem.PublicClient<viem.Transport, viem.Chain>;
   const abi = fixture.abi as viem.Abi;
   let address: viem.Address;
   let deployHash: viem.Hex;
 
   const send = async (functionName: string, args: unknown[]) => {
-    const hash = await wallet.writeContract({ address, abi, functionName, args, chain });
+    const hash = await wallet.writeContract({ address, abi, functionName, args });
     await pub.waitForTransactionReceipt({ hash });
     return hash;
   };
 
   beforeAll(async () => {
-    node = await runRpc({ port: PORT, chainId: CHAIN_ID });
+    // port 0: anvil picks a free port, so a run never collides with a stray node of an earlier one
+    node = await runRpc({ port: 0, chainId: CHAIN_ID });
+    url = node.host;
+    const chain = viem.defineChain({
+      id: CHAIN_ID,
+      name: 'local',
+      nativeCurrency: { name: 'E', symbol: 'E', decimals: 18 },
+      rpcUrls: { default: { http: [url] } },
+    });
+    wallet = viem.createWalletClient({ account, chain, transport: viem.http(url), pollingInterval: 50 });
+    pub = viem.createPublicClient({ chain, transport: viem.http(url), pollingInterval: 50 });
     deployHash = await wallet.deployContract({
       abi,
       bytecode: fixture.bytecode as viem.Hex,
       args: [account.address],
-      chain,
     });
     address = (await pub.waitForTransactionReceipt({ hash: deployHash })).contractAddress!;
   }, 60000);
@@ -65,6 +69,14 @@ describe('createChainReader', () => {
     expect(await reader.call(address, getValue, [])).toBe(2n);
     const earlier = await createChainReader(url, { block: reader.blockNumber - 1n });
     expect(await earlier.call(address, getValue, [])).toBe(1n);
+  });
+
+  it('refuses a block above the chain head', async () => {
+    const head = await pub.getBlockNumber();
+    await expect(createChainReader(url, { block: head + 100n })).rejects.toThrow(
+      `block ${head + 100n} is above the chain head (${head})`
+    );
+    expect((await createChainReader(url, { block: head })).blockNumber).toBe(head);
   });
 
   it('getCode returns the runtime code, and undefined where there is none', async () => {
