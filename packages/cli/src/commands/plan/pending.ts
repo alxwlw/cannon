@@ -5,11 +5,13 @@ import {
   CannonLoader,
   CannonRegistry,
   ChainArtifacts,
+  ChainBuilderContext,
   ChainBuilderRuntime,
   ChainDefinition,
   createInitialContext,
   DeploymentInfo,
 } from '@usecannon/builder';
+import { shortError } from './check';
 import { kindOf } from './kind';
 import { PendingChange } from './types';
 
@@ -49,6 +51,8 @@ const OUTPUT_KINDS = new Set(['deploy', 'router', 'clone']);
  * What the next build of `gitDef` would add, change or remove against the recorded deployment. It compares the
  * builder's own step hashes with the recorded ones, the way `build()` decides to re-run a step, not the raw config
  * text: a `depends` edit is not a change. Nothing is compiled, so a changed contract source is not detected.
+ * A step that cannot be rendered is `changed` (`may-change` below an added or changed dependency); a step whose state
+ * cannot be computed (a registry lookup that failed) rejects, unless such a dependency explains it.
  */
 export async function computePending(
   record: DeploymentInfo,
@@ -78,6 +82,31 @@ export async function computePending(
       return (change === 'added' || change === 'changed') && (!only || only(dep));
     });
 
+  type Change = 'changed' | 'may-change' | null;
+  /** The change of a step present in both, or null when a build would leave it as recorded. */
+  const judge = async (n: string, ctx: ChainBuilderContext, hash: string | null | undefined): Promise<Change> => {
+    const changedIf = (yes: boolean): Change => (yes ? 'changed' : null);
+    let config: unknown;
+    try {
+      config = gitDef.getConfig(n, ctx);
+      // clone always re-runs, so its hash says nothing: compare what it is configured with
+      if (kindOf(n) === 'clone') return changedIf(JSON.stringify(config) !== JSON.stringify(recordDef.getConfig(n, ctx)));
+    } catch {
+      // cannot be rendered against the record: a build would not run it as it is either
+      return upstream(n) ? 'may-change' : 'changed';
+    }
+    let cur: string[] | null;
+    try {
+      cur = await gitDef.getState(n, runtime, ctx, false);
+    } catch (err) {
+      // an added or changed dependency explains it (its outputs are not in the record), and is pending itself
+      if (upstream(n)) return 'may-change';
+      // anything else (a registry lookup that failed, say) is not a change of the cannonfile: the run fails
+      throw new Error(`cannot compute the state of ${n}: ${shortError(err)}`);
+    }
+    return changedIf(hash !== 'SKIP' && !!cur && !cur.includes(hash || ''));
+  };
+
   for (const n of gitDef.topologicalActions) {
     const recorded = record.state[n];
     if (!recorded) {
@@ -92,20 +121,8 @@ export async function computePending(
     addOutputsToContext(ctx, artifacts);
     addOutputsToContext(ctx, recorded.artifacts);
 
-    try {
-      let changed: boolean;
-      if (kindOf(n) === 'clone') {
-        // clone always re-runs, so its hash says nothing: compare what it is configured with
-        changed = JSON.stringify(gitDef.getConfig(n, ctx)) !== JSON.stringify(recordDef.getConfig(n, ctx));
-      } else {
-        const cur = await gitDef.getState(n, runtime, ctx, false);
-        changed = recorded.hash !== 'SKIP' && !!cur && !cur.includes(recorded.hash || '');
-      }
-      if (changed) listed.set(n, 'changed');
-    } catch (err) {
-      // cannot be evaluated against this chain: a build would not run it as-is either
-      listed.set(n, upstream(n) ? 'may-change' : 'changed');
-    }
+    const change = await judge(n, ctx, recorded.hash);
+    if (change) listed.set(n, change);
 
     built.set(n, _.merge(artifacts, recorded.artifacts));
   }

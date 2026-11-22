@@ -172,9 +172,9 @@ describe('plan pending changes', () => {
       return { def, record };
     };
 
-    it('is changed, never a throw', async () => {
+    it('fails the run when nothing upstream explains it: an unknown state is not a pending change', async () => {
       const { def, record } = withGhost([]);
-      expect(await pending(record, mainStorage, def)).toEqual([{ step: 'deploy.ghost', change: 'changed' }]);
+      await expect(pending(record, mainStorage, def)).rejects.toThrow(/^cannot compute the state of deploy\.ghost: /);
     });
 
     it('may change when a dependency is added or changed', async () => {
@@ -185,6 +185,78 @@ describe('plan pending changes', () => {
         { step: 'deploy.ghost', change: 'may-change' },
         { step: 'invoke.allowA', change: 'may-change' },
         { step: 'invoke.setValue', change: 'may-change' },
+      ]);
+    });
+  });
+
+  describe('render failures and state failures are told apart', () => {
+    const unrenderable = (d: any) => (d.invoke.setValue.args = ['<%= settings.missing.deep %>']);
+
+    it('a step that cannot be rendered against the record is changed', async () => {
+      expect(await pending(main.record, mainStorage, editedDef(unrenderable))).toEqual([
+        { step: 'invoke.setValue', change: 'changed' },
+      ]);
+    });
+
+    it('a step that cannot be rendered may change when a dependency is changed', async () => {
+      const def = editedDef((d) => {
+        unrenderable(d);
+        d.deploy.fixture.args = [ADDRESS_A];
+      });
+      expect(await pending(main.record, mainStorage, def)).toEqual([
+        { step: 'deploy.fixture', change: 'changed' },
+        { step: 'invoke.allowA', change: 'may-change' },
+        { step: 'invoke.setValue', change: 'may-change' },
+      ]);
+    });
+
+    describe('a pull step, whose state is a registry lookup', () => {
+      const withPull = () => {
+        const def = editedDef((d) => (d.pull = { p: { source: SOURCE.replace('pending-child', 'pending-pulled') } }));
+        const record = _.cloneDeep(main.record);
+        record.def = def;
+        record.state['pull.p'] = { artifacts: {}, hash: 'recorded', version: 3 } as any;
+        return { def, record };
+      };
+      const runtimeWith = (registry: InMemoryRegistry) =>
+        createReadOnlyRuntime({
+          provider: fixtureClients(url, CHAIN_ID).pub,
+          chainId: CHAIN_ID,
+          registry,
+          loaders: { ipfs: mainStorage.loader },
+        });
+
+      it('fails the run when the lookup fails (a network error is not a pending change)', async () => {
+        const down = new InMemoryRegistry();
+        down.getUrl = () => Promise.reject(new Error('registry unreachable'));
+        const { def, record } = withPull();
+        await expect(computePending(record, new ChainDefinition(def), runtimeWith(down), CHAIN_ID)).rejects.toThrow(
+          new Error('cannot compute the state of pull.p: registry unreachable')
+        );
+      });
+
+      it('is compared by the url the lookup returns', async () => {
+        const up = new InMemoryRegistry();
+        await up.publish(['plan-pending-pulled:1.0.0@main'], CHAIN_ID, 'ipfs://QmPulled');
+        const { def, record } = withPull();
+        expect(await computePending(record, new ChainDefinition(def), runtimeWith(up), CHAIN_ID)).toEqual([
+          { step: 'pull.p', change: 'changed' },
+        ]);
+      });
+    });
+
+    it('a router whose new module is an added step may change, never a throw', async () => {
+      // the module is not in the record, so the router's state (the module ABIs) cannot be computed against it
+      const def = editedDef((d) => {
+        d.deploy.mod = { artifact: 'PlanFixture', args: [OWNER] };
+        d.router = { r: { contracts: ['fixture', 'mod'] } };
+      });
+      const record = _.cloneDeep(main.record);
+      record.def = def;
+      record.state['router.r'] = { artifacts: {}, hash: 'recorded', version: 3 } as any;
+      expect(await pending(record, mainStorage, def)).toEqual([
+        { step: 'deploy.mod', change: 'added' },
+        { step: 'router.r', change: 'may-change' },
       ]);
     });
   });
