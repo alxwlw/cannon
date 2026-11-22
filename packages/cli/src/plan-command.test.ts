@@ -1,3 +1,5 @@
+import commandsConfig from './commands/config';
+
 const mockPlan = jest.fn();
 jest.mock('./commands/plan', () => ({ plan: (...a: unknown[]) => mockPlan(...a) }));
 
@@ -98,5 +100,12 @@ describe('cannon plan command', () => {
   it('accepts 0 for --depth and --block', async () => {
     await run('pkg:1.0.0', '-n', 'http://rpc.invalid', '--depth', '0', '--block', '0');
     expect(mockPlan).toHaveBeenCalledWith(expect.objectContaining({ depth: 0, block: 0n }));
+  });
+
+  it('its help documents the exit codes and the exports of a hints module', () => {
+    const config = commandsConfig.plan;
+    expect(config.description).toContain('Exit code: 0 in sync, 2 drift or pending changes, 1 the run failed');
+    const hints = (config.options ?? []).find((o) => o.flags === '--hints <file>');
+    expect(hints?.description).toMatch(/`checks`.*`skip`.*`enumerations`/);
   });
 });

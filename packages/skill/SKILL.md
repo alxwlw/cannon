@@ -14,7 +14,7 @@ description: Cannon package manager for Ethereum deployments. Use when building,
 - `cannon register` — registers package names on-chain
 - `cannon publishers` — manages package publisher permissions
 
-Safe commands: `cannon build --dry-run`, `cannon inspect`, `cannon run`, `cannon test`, `cannon decode`, `cannon trace`, `cannon clean`
+Safe commands: `cannon build --dry-run`, `cannon inspect`, `cannon plan`, `cannon run`, `cannon test`, `cannon decode`, `cannon trace`, `cannon clean`
 
 Rules:
 1. **Always use `--dry-run` first** — Simulate before executing on real networks

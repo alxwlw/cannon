@@ -558,7 +558,8 @@ export const commandsConfig: CommandsConfig = {
     ],
   },
   plan: {
-    description: 'Check a deployed package against the live chain and show what a build would change (read-only)',
+    description:
+      'Check a deployed package against the live chain and show what a build would change (read-only). Exit code: 0 in sync, 2 drift or pending changes, 1 the run failed',
     arguments: [
       {
         flags: '<packageRef>',
@@ -580,15 +581,16 @@ export const commandsConfig: CommandsConfig = {
       },
       {
         flags: '--hints <file>',
-        description: 'JavaScript module with checks, skip rules and enumerations for steps the automatic rules cannot judge',
+        description:
+          'JavaScript module (CommonJS, or ESM as .mjs) exporting `checks` (by setter name), `skip` (step names or RegExps) and `enumerations` (functions adding rows), for steps the automatic rules cannot judge',
       },
       {
         flags: '--block <number>',
-        description: 'Block to read every check at (default: the latest block, fixed once at start)',
+        description: 'Block to read every check at, not above the head (default: the latest block, fixed once at start)',
       },
       {
         flags: '--depth <number>',
-        description: 'How many levels of cloned packages to walk into (default: all)',
+        description: 'How many levels of cloned packages to walk into (default: all); a clone past it is not checked',
       },
       {
         flags: '--no-bytecode',
