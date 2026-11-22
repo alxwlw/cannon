@@ -35,7 +35,8 @@ function setLike(x: unknown): unknown {
 }
 
 const firstLine = (s: string) => s.split('\n')[0];
-function shortError(e: unknown): string {
+/** The first line of an error: viem's `shortMessage` when it has one. */
+export function shortError(e: unknown): string {
   const err = e as { shortMessage?: unknown; message?: unknown };
   return firstLine(String(err?.shortMessage || err?.message || e));
 }
