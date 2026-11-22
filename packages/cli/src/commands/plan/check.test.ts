@@ -62,6 +62,7 @@ function fakeReader(values: Record<string, unknown>): ChainReader & { calls: str
   };
 }
 const k = (name: string, args: unknown[] = []) => `${ADDR}|${name}|${show(args)}`;
+const NORMALIZED = 'normalized by contract (matches recorded event)';
 
 describe('runCheck', () => {
   it('equal: in-sync with a slot', async () => {
@@ -287,6 +288,31 @@ describe('runCheck', () => {
         { Created: [{ args: ['1'] }] }
       );
       expect(out).toMatchObject({ status: 'in-sync', detail: 'normalized by contract (matches recorded event)' });
+    });
+
+    describe('only the last argument of an event, and never a key argument', () => {
+      // setLimit(7, 5): 7 is the key, 5 the value; the chain holds `chain` for key 7
+      const limit = (chain: bigint, args: unknown[]) =>
+        runCheck(derive('setLimit'), fn('setLimit'), ['7', '5'], ADDR, fakeReader({ [k('getLimit', [7n])]: chain }), {
+          LimitSet: [{ args }],
+        });
+
+      it('a key-plus-new-value event explains the live value', async () => {
+        expect(await limit(1n, ['7', '1'])).toMatchObject({ status: 'in-sync', detail: NORMALIZED, actual: ['1'] });
+      });
+
+      it('an event arg that only equals the key does not', async () => {
+        expect((await limit(7n, ['7', '5'])).status).toBe('drift');
+      });
+
+      it('an earlier argument (an old value) does not', async () => {
+        expect((await limit(3n, ['7', '3', '5'])).status).toBe('drift');
+      });
+
+      it('a last argument equal to the key does not, nor a one-arg event that is the key', async () => {
+        expect((await limit(7n, ['5', '7'])).status).toBe('drift');
+        expect((await limit(7n, ['7'])).status).toBe('drift');
+      });
     });
 
     it('a whole args tuple may match the actual value', async () => {

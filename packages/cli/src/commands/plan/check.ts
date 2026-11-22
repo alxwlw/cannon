@@ -49,15 +49,32 @@ function canon(v: unknown): unknown {
   return v ?? null;
 }
 
-function matchesRecordedEvent(actual: unknown, events: RecordedEvents | undefined): boolean {
+/**
+ * The normalized key arguments of a check: they name the slot, they are never the value written to it. A fields or
+ * struct-keyed check has none here: its parts are matched on their own, and its whole actual is a tuple that no
+ * single event arg can equal.
+ */
+function keyArgsOf(chk: Check, setter: viem.AbiFunction, args: unknown[]): unknown[] {
+  return 'keyIdx' in chk ? chk.keyIdx.map((i) => normalize(args[i], setter.inputs[i])) : [];
+}
+
+/**
+ * Whether a recorded event says the contract stored the value the chain holds: all of an event's args equal the
+ * value (a multi-value getter), or its last arg does (`ValueSet(key, value)`), unless that arg is one of the
+ * step's key args.
+ */
+function matchesRecordedEvent(actual: unknown, events: RecordedEvents | undefined, keys: unknown[]): boolean {
   if (!events) return false;
   const target = canon(actual);
   const single = Array.isArray(actual) && actual.length === 1 ? canon(actual[0]) : undefined;
+  const isKey = (a: unknown) => keys.some((k) => sameValue(canon(k), canon(a)));
   return Object.values(events)
     .flat()
     .some(({ args }) => {
-      if (sameValue(canon(args), target)) return true;
-      return args.some((a) => sameValue(canon(a), target) || sameValue(canon(a), single));
+      if (args.length > 1 && sameValue(canon(args), target)) return true;
+      const last = args[args.length - 1];
+      if (last === undefined || isKey(last)) return false;
+      return sameValue(canon(last), target) || sameValue(canon(last), single);
     });
 }
 
@@ -188,7 +205,7 @@ export async function runCheck(
       'getter' in check ? check.getter.name : check.fields.map((f) => ('getter' in f ? f.getter.name : '')).join('+');
     return { status: 'error', getter, expected: null, actual: null, detail: shortError(e) };
   }
-  if (outcome.status === 'drift' && matchesRecordedEvent(outcome.actual, events)) {
+  if (outcome.status === 'drift' && matchesRecordedEvent(outcome.actual, events, keyArgsOf(check, setter, args))) {
     return { ...outcome, status: 'in-sync', detail: NORMALIZED_BY_CONTRACT };
   }
   return outcome;
