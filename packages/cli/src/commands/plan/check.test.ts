@@ -258,9 +258,35 @@ describe('runCheck', () => {
     });
 
     it('an in-sync result is not touched by events', async () => {
-      const out = await run({ DelaySet: [{ args: [1n] }] }, 0n);
+      const out = await run({ DelaySet: [{ args: [0n] }] }, 0n);
       expect(out.status).toBe('in-sync');
       expect(out.detail).toBeUndefined();
+    });
+
+    it('a single array event argument may match the actual value', async () => {
+      const out = await runCheck(
+        derive('setPair'),
+        fn('setPair'),
+        [1n, 2n],
+        ADDR,
+        fakeReader({ [k('getPair')]: [1n, 9n] }),
+        {
+          PairSet: [{ args: [[1n, 9n]] }],
+        }
+      );
+      expect(out.status).toBe('in-sync');
+    });
+
+    it('fields: each part is normalized on its own', async () => {
+      const out = await runCheck(
+        derive('createThing'),
+        fn('createThing'),
+        [0n, 2n],
+        ADDR,
+        fakeReader({ [k('getThingA')]: 1n, [k('getThingB')]: 2n }),
+        { Created: [{ args: ['1'] }] }
+      );
+      expect(out).toMatchObject({ status: 'in-sync', detail: 'normalized by contract (matches recorded event)' });
     });
 
     it('a whole args tuple may match the actual value', async () => {

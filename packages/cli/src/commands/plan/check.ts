@@ -56,7 +56,7 @@ function matchesRecordedEvent(actual: unknown, events: RecordedEvents | undefine
     .flat()
     .some(({ args }) => {
       if (sameValue(canon(args), target)) return true;
-      return args.some((a) => sameValue(canon(a), target) || (single !== undefined && sameValue(canon(a), single)));
+      return args.some((a) => sameValue(canon(a), target) || sameValue(canon(a), single));
     });
 }
 
@@ -187,7 +187,7 @@ export async function runCheck(
       'getter' in check ? check.getter.name : check.fields.map((f) => ('getter' in f ? f.getter.name : '')).join('+');
     return { status: 'error', getter, expected: null, actual: null, detail: shortError(e) };
   }
-  if (outcome.status === 'drift' && check.compare !== 'fields' && matchesRecordedEvent(outcome.actual, events)) {
+  if (outcome.status === 'drift' && matchesRecordedEvent(outcome.actual, events)) {
     return { ...outcome, status: 'in-sync', detail: NORMALIZED_BY_CONTRACT };
   }
   return outcome;
