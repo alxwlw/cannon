@@ -634,6 +634,34 @@ applyCommandsConfig(program.command('publishers'), commandsConfig.publishers).ac
   }
 });
 
+applyCommandsConfig(program.command('plan'), commandsConfig.plan).action(async function (packageRef, options) {
+  try {
+    spinner?.update({ text: 'Planning...' });
+    const { plan } = await import('./commands/plan');
+
+    if (!options.rpcUrl) throw new Error('--rpc-url is required: cannon plan reads the chain it checks against');
+
+    // the report goes to stdout: nothing of the spinner may share the stream
+    logSpinnerEnd();
+    const { exitCode } = await plan({
+      packageRef,
+      chainId: options.chainId ? Number(options.chainId) : undefined,
+      rpcUrl: options.rpcUrl,
+      cannonfile: options.cannonfile,
+      hints: options.hints,
+      block: options.block !== undefined ? BigInt(options.block) : undefined,
+      depth: options.depth !== undefined ? Number(options.depth) : undefined,
+      bytecode: options.bytecode !== false,
+      out: options.out,
+      json: Boolean(options.json),
+    });
+    process.exitCode = exitCode;
+  } catch (err) {
+    logSpinnerEnd();
+    throw err;
+  }
+});
+
 applyCommandsConfig(program.command('inspect'), commandsConfig.inspect).action(async function (packageRef, options) {
   try {
     spinner?.update({ text: 'Inspecting...' });

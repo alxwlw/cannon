@@ -557,6 +557,54 @@ export const commandsConfig: CommandsConfig = {
       ...debugVerbosity,
     ],
   },
+  plan: {
+    description: 'Check a deployed package against the live chain and show what a build would change (read-only)',
+    arguments: [
+      {
+        flags: '<packageRef>',
+        description: 'Name, version and preset of the deployed Cannon package (name:version@preset) or its ipfs:// url',
+      },
+    ],
+    options: [
+      {
+        flags: '-c --chain-id <chainId>',
+        description: 'Chain ID of the variant to check',
+      },
+      {
+        flags: '-n --rpc-url <url>',
+        description: 'RPC endpoint of the chain to check against (required)',
+      },
+      {
+        flags: '--cannonfile <path>',
+        description: 'Cannonfile to compare with the deployed record: lists the steps a build would add, change or remove',
+      },
+      {
+        flags: '--hints <file>',
+        description: 'JavaScript module with checks, skip rules and enumerations for steps the automatic rules cannot judge',
+      },
+      {
+        flags: '--block <number>',
+        description: 'Block to read every check at (default: the latest block, fixed once at start)',
+      },
+      {
+        flags: '--depth <number>',
+        description: 'How many levels of cloned packages to walk into (default: all)',
+      },
+      {
+        flags: '--no-bytecode',
+        description: 'Skip the deployed bytecode checks',
+      },
+      {
+        flags: '-o --out <dir>',
+        description: 'Also write plan.json and plan.md into this directory',
+      },
+      {
+        flags: '--json',
+        description: 'Print the report as JSON instead of Markdown',
+      },
+      ...debugVerbosity,
+    ],
+  },
   inspect: {
     description: 'Inspect the details of a Cannon package',
     arguments: [
