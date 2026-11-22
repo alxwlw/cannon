@@ -12,12 +12,13 @@ import {
   getContractFromPath,
 } from '@usecannon/builder';
 import { ByteRange, compareCode } from './bytecode';
-import { RecordedEvents, runCheck, shortError } from './check';
-import { deriveCheck } from './derive';
-import { HintsModule, isSkipped, makeRead } from './hints';
+import { RecordedEvents, shortError } from './check';
+import { HintsModule, isSkipped } from './hints';
+import { kindOf } from './kind';
 import { checkOrphan } from './link';
 import { ChainReader } from './read';
-import { CheckOutcome, StepResult } from './types';
+import { checkFields, checkSetter, decodeArgs } from './setter';
+import { StepResult } from './types';
 
 export interface WalkOptions {
   chainId: number;
@@ -35,15 +36,8 @@ type Artifact = { deployedBytecode?: string; immutableReferences?: unknown };
 /** The rendered fields this walker reads; `getConfig` returns the action's own config type. */
 type StepConfig = { chains?: number[]; target?: string | string[]; func?: string; args?: unknown[]; abi?: string };
 
-// the builder still accepts these legacy action names; rows carry the current name
-const KIND_ALIASES: Record<string, string> = { contract: 'deploy', provision: 'clone', import: 'pull' };
 const NOT_EXECUTED = 'declared, not in record (never executed)';
 const PACKAGE_STEP = '(package)';
-
-const kindOf = (step: string) => {
-  const raw = step.split('.')[0];
-  return KIND_ALIASES[raw] ?? raw;
-};
 
 const byteLength = (hex: string | undefined) => (hex ? hex.replace(/^0x/i, '').length / 2 : null);
 
@@ -165,7 +159,7 @@ async function walkPackage(
         hints: opts.hints,
         order: rows.length,
       });
-      rows.push(...found.map((r) => ({ ...r, kind: kindOf(n) })));
+      rows.push(...found);
     }
   }
 
@@ -259,40 +253,24 @@ async function walkPackage(
       };
     }
     const withCall = { ...base, target, call: { func: setter.name, args } };
-
-    // precedence: a hint for the setter, then the derived getter, else nothing to compare
-    let outcome: CheckOutcome | null = null;
-    let rule = '';
-    const hint = opts.hints.checks?.[setter.name];
-    if (hint) {
-      try {
-        outcome = await hint({
-          step: n,
-          setter,
-          args,
-          address: contract.address,
-          abi: contract.abi,
-          events,
-          read: makeRead(opts.reader),
-        });
-      } catch (e) {
-        return { ...withCall, status: 'error', detail: `hint ${setter.name}: ${shortError(e)}` };
-      }
-      if (outcome) rule = `hint:${setter.name}`;
+    let decoded: readonly unknown[];
+    try {
+      decoded = decodeArgs(setter, args);
+    } catch (e) {
+      return { ...withCall, status: 'error', detail: `args: ${shortError(e)}` };
     }
-    if (!outcome) {
-      const check = deriveCheck(setter, contract.abi);
-      if (!check) return { ...withCall, status: 'unchecked', detail: 'no derivable getter' };
-      rule = check.rule;
-      outcome = await runCheck(check, setter, args, contract.address, opts.reader, events);
-    }
-    return {
-      ...withCall,
-      status: outcome.status,
-      check: { rule, getter: outcome.getter, expected: outcome.expected, actual: outcome.actual },
-      ...(outcome.slot ? { slot: outcome.slot } : {}),
-      ...(outcome.detail ? { detail: outcome.detail } : {}),
-    };
+    const verdict = await checkSetter({
+      step: n,
+      setter,
+      abi: contract.abi,
+      address: contract.address,
+      args: decoded,
+      events,
+      reader: opts.reader,
+      hints: opts.hints,
+    });
+    if (verdict.status !== 'checked') return { ...withCall, status: verdict.status, detail: verdict.detail };
+    return { ...withCall, status: verdict.outcome.status, ...checkFields(verdict) };
   }
 
   async function checkCode(n: string, name: string, c: ContractData): Promise<Row> {

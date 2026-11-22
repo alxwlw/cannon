@@ -1,11 +1,12 @@
 import * as viem from 'viem';
 import { ChainArtifacts, ChainBuilderContext } from '@usecannon/builder';
-import { deriveCheck } from './derive';
-import { runCheck, RecordedEvents } from './check';
-import { HintContext, HintsModule, isSkipped, makeRead } from './hints';
+import { RecordedEvents, shortError } from './check';
+import { HintsModule, isSkipped } from './hints';
+import { kindOf } from './kind';
 import { sameValue } from './normalize';
 import { ChainReader } from './read';
-import { Check, CheckOutcome, Slot, StepResult } from './types';
+import { checkFields, checkSetter } from './setter';
+import { Slot, StepResult } from './types';
 
 type Found = { name: string; abi: viem.Abi };
 type ContractsOf = {
@@ -31,12 +32,6 @@ export function findContractByAddress(ctx: ChainBuilderContext, address: viem.Ad
   return search(ctx as ContractsOf, address);
 }
 
-const firstLine = (s: string) => s.split('\n')[0];
-function shortError(e: unknown): string {
-  const err = e as { shortMessage?: unknown; message?: unknown };
-  return firstLine(String(err?.shortMessage || err?.message || e));
-}
-
 /** Decoded arguments in report form: bigints become decimal strings. */
 function plain(v: unknown): unknown {
   if (typeof v === 'bigint') return v.toString();
@@ -44,8 +39,6 @@ function plain(v: unknown): unknown {
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, plain(x)]));
   return v;
 }
-
-const kindOf = (step: string) => step.split('.')[0];
 
 export async function checkOrphan(a: {
   pkg: string;
@@ -104,47 +97,21 @@ export async function checkOrphan(a: {
         call: { func: setter.name, args: plain(args) as unknown[] },
       };
 
-      const events = txn.events || {};
-      let outcome: CheckOutcome | null = null;
-      let rule = '';
-      const hint = a.hints.checks?.[setter.name];
-      if (hint) {
-        const hctx: HintContext = {
-          step: a.step,
-          setter,
-          args,
-          address: tx.to,
-          abi: target.abi,
-          events,
-          read: makeRead(a.reader),
-        };
-        try {
-          outcome = await hint(hctx);
-        } catch (e) {
-          return fail(`hint ${setter.name}: ${shortError(e)}`, withTarget);
-        }
-        if (outcome) rule = `hint:${setter.name}`;
-      }
-      if (!outcome) {
-        const check: Check | null = deriveCheck(setter, target.abi);
-        if (!check) {
-          return row({
-            ...withTarget,
-            orphan: { effect: 'unchecked', conflicting: false },
-            detail: `no check derived for ${setter.name}`,
-          });
-        }
-        rule = check.rule;
-        outcome = await runCheck(check, setter, args, tx.to, a.reader, events);
-      }
-      const slot: Slot | undefined = outcome.slot;
-      return row({
-        ...withTarget,
-        orphan: { effect: outcome.status, conflicting: false },
-        check: { rule, getter: outcome.getter, expected: outcome.expected, actual: outcome.actual },
-        ...(slot ? { slot } : {}),
-        ...(outcome.detail ? { detail: outcome.detail } : {}),
+      const verdict = await checkSetter({
+        step: a.step,
+        setter,
+        abi: target.abi,
+        address: tx.to,
+        args,
+        events: txn.events || {},
+        reader: a.reader,
+        hints: a.hints,
       });
+      if (verdict.status === 'error') return fail(verdict.detail, withTarget);
+      if (verdict.status === 'unchecked') {
+        return row({ ...withTarget, orphan: { effect: 'unchecked', conflicting: false }, detail: verdict.detail });
+      }
+      return row({ ...withTarget, orphan: { effect: verdict.outcome.status, conflicting: false }, ...checkFields(verdict) });
     } catch (e) {
       return fail(shortError(e));
     }

@@ -10,6 +10,7 @@ import {
   createInitialContext,
   DeploymentInfo,
 } from '@usecannon/builder';
+import { kindOf } from './kind';
 import { PendingChange } from './types';
 
 const READ_ONLY = 'cannon plan is read-only';
@@ -41,12 +42,6 @@ export function createReadOnlyRuntime(a: {
   );
 }
 
-// legacy kinds count as their new names
-const KIND_ALIASES: Record<string, string> = { contract: 'deploy', provision: 'clone', import: 'pull' };
-const kindOf = (step: string) => {
-  const kind = step.split('.')[0];
-  return KIND_ALIASES[kind] ?? kind;
-};
 // a change in one of these can alter the addresses and outputs steps downstream read
 const OUTPUT_KINDS = new Set(['deploy', 'router', 'clone']);
 

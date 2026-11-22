@@ -214,12 +214,53 @@ describe('walkRecord', () => {
       actual: 'chain-says',
     });
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ step: 'invoke.setDelay', args: ['0'], address: main.addresses.fixture });
+    // ABI-decoded, as the contract received it: the cannonfile's '0' is 0n
+    expect(seen[0]).toMatchObject({ step: 'invoke.setDelay', args: [0n], address: main.addresses.fixture });
     // the contract stored 1 for the 0 it was given, and said so in its event
     expect(seen[0].events.DelaySet[0].args).toEqual(['1']);
     expect(seen[0].setter.name).toBe('setDelay');
     expect(seen[0].abi).toEqual(abi);
     expect(await seen[0].read(main.addresses.fixture, 'getValue() view returns (uint256)', [])).toBe(42n);
+  });
+
+  it('a hint gets ABI-decoded args, the same shape for a declared step and an orphan', async () => {
+    const TUNED = viem.padHex('0x7e', { size: 32 });
+    const record = edited((r) => {
+      // the cannonfile may spell an address in lower case: the contract received it, and a hint sees it, checksummed
+      (r.def.invoke as Record<string, Record<string, unknown>>).allowA.args = [ADDRESS_A.toLowerCase()];
+      r.state['invoke.tuned'] = {
+        artifacts: { txns: { tuned: { hash: TUNED, events: {} } } },
+        hash: 'unused',
+        version: 7,
+      } as unknown as DeploymentInfo['state'][string];
+    });
+    const base = await opts();
+    const reader: ChainReader = {
+      ...base.reader,
+      getTransaction: async (hash) =>
+        hash === TUNED
+          ? { to: main.addresses.fixture, input: viem.encodeFunctionData({ abi, functionName: 'setDelay', args: [7n] }) }
+          : base.reader.getTransaction(hash),
+    };
+    const seen: [string, string, unknown[]][] = [];
+    const remember = async (ctx: HintContext) => {
+      seen.push([ctx.step, typeof ctx.args[0], ctx.args]);
+      return null;
+    };
+    const rows = await walkRecord(record, 'root', {
+      ...base,
+      reader,
+      hints: { checks: { setDelay: remember, addToAllowlist: remember } },
+    });
+    expect(seen).toEqual([
+      ['invoke.allowA', 'string', [ADDRESS_A]],
+      ['invoke.setDelay', 'bigint', [0n]],
+      ['invoke.tuned', 'bigint', [7n]],
+    ]);
+    expect(ADDRESS_A).not.toBe(ADDRESS_A.toLowerCase());
+    // a null outcome falls through to the derived getter on both sides
+    expect(byStep(rows, 'invoke.tuned')[0]).toMatchObject({ orphan: { effect: 'drift' }, check: { rule: 'auto:equal/1' } });
+    expect(byStep(rows, 'invoke.setDelay')[0]).toMatchObject({ status: 'in-sync', check: { rule: 'auto:equal/1' } });
   });
 
   it('a step dropped from the definition but kept in the record is an orphan, checked against all recorded contracts', async () => {
@@ -392,6 +433,22 @@ describe('walkRecord', () => {
           target: { name: 'fixture', address: main.addresses.fixture },
           call: { func: 'setValueTwice', args: ['42'] },
           detail: 'setter setValueTwice not in ABI',
+        },
+      ]);
+    });
+
+    it('args the ABI cannot encode', async () => {
+      const rows = await walkEdited((cfg) => (cfg.args = ['forty-two']));
+      expect(rows).toEqual([
+        {
+          pkg: 'root',
+          step: 'invoke.setValue',
+          kind: 'invoke',
+          status: 'error',
+          order: 5,
+          target: { name: 'fixture', address: main.addresses.fixture },
+          call: { func: 'setValue', args: ['forty-two'] },
+          detail: 'args: Cannot convert forty-two to a BigInt',
         },
       ]);
     });

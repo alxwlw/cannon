@@ -207,6 +207,8 @@ describe('checkOrphan', () => {
     expect(rows[0].orphan).toEqual({ effect: 'unchecked', conflicting: false });
     expect(rows[0].call?.func).toBe('initializeThing');
     expect(rows[0].check).toBeUndefined();
+    // the same text a declared step without a getter carries
+    expect(rows[0].detail).toBe('no derivable getter');
   });
 
   it('lets a hint check first and names the rule hint:<name>', async () => {
@@ -249,7 +251,7 @@ describe('checkOrphan', () => {
       })
     );
     expect(rows[0].orphan?.effect).toBe('error');
-    expect(rows[0].detail).toContain('hint blew up');
+    expect(rows[0].detail).toBe('hint setDelay: hint blew up');
   });
 
   it('passes the recorded events of the transaction to the check', async () => {
