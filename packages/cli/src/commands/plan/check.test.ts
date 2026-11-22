@@ -298,3 +298,70 @@ describe('runCheck', () => {
     });
   });
 });
+
+describe('runCheck with tuple getters', () => {
+  const tupleAbi = viem.parseAbi([
+    'struct P { uint256 a; address b; }',
+    'function setOut(uint128 id, uint256 a, address b)',
+    'function getOut(uint128 id) view returns (P)',
+    'function setIn(uint128 id, P p)',
+    'function getIn(uint128 id) view returns (uint256, address)',
+  ]);
+  const tfn = (name: string) => tupleAbi.find((f) => f.type === 'function' && f.name === name) as viem.AbiFunction;
+  const tderive = (name: string) => {
+    const c = deriveCheck(tfn(name), tupleAbi);
+    if (!c) throw new Error('no check derived for ' + name);
+    return c;
+  };
+  const B = viem.getAddress(OWNER);
+  const C = viem.getAddress(OTHER);
+
+  it('tupleOut: in-sync when the returned struct holds the written values', async () => {
+    const chk = tderive('setOut');
+    expect(chk.compare).toBe('tupleOut');
+    const out = await runCheck(
+      chk,
+      tfn('setOut'),
+      [3n, 12n, OWNER.toLowerCase()],
+      ADDR,
+      fakeReader({ [k('getOut', [3n])]: { a: 12n, b: B } })
+    );
+    expect(out).toMatchObject({ status: 'in-sync', expected: ['12', B], actual: ['12', B] });
+    expect(out.slot).toEqual({ address: ADDR, getter: 'getOut', keys: '["3"]' });
+  });
+
+  it('tupleOut: drift reports normalized expected and actual', async () => {
+    const out = await runCheck(
+      tderive('setOut'),
+      tfn('setOut'),
+      [3n, 12n, OWNER],
+      ADDR,
+      fakeReader({ [k('getOut', [3n])]: [13n, C] })
+    );
+    expect(out).toMatchObject({ status: 'drift', expected: ['12', B], actual: ['13', C] });
+  });
+
+  it('tupleIn: in-sync when the returned values are the written struct', async () => {
+    const chk = tderive('setIn');
+    expect(chk.compare).toBe('tupleIn');
+    const out = await runCheck(
+      chk,
+      tfn('setIn'),
+      [3n, { a: '12', b: OWNER.toLowerCase() }],
+      ADDR,
+      fakeReader({ [k('getIn', [3n])]: [12n, B] })
+    );
+    expect(out).toMatchObject({ status: 'in-sync', expected: ['12', B], actual: ['12', B] });
+  });
+
+  it('tupleIn: drift reports normalized expected and actual', async () => {
+    const out = await runCheck(
+      tderive('setIn'),
+      tfn('setIn'),
+      [3n, [12n, OWNER]],
+      ADDR,
+      fakeReader({ [k('getIn', [3n])]: [12n, C] })
+    );
+    expect(out).toMatchObject({ status: 'drift', expected: ['12', B], actual: ['12', C] });
+  });
+});
