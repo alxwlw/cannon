@@ -549,4 +549,62 @@ describe('linkResults: enumerations', () => {
     const out = linkResults([member('invoke.addA', 'auto:contains', A, [A]), o]);
     expect(out[1].orphan?.conflicting).toBe(false);
   });
+
+  it('names an orphan once when two of its transactions add the same extra member', async () => {
+    const orphans = await checkOrphan(
+      base({
+        step: 'invoke.oldAdd',
+        order: 9,
+        artifacts: artifactsOf({ a: { hash: HASH1 }, b: { hash: HASH2 } }),
+        reader: reader({
+          txns: {
+            [HASH1]: { to: ADDR, input: enc('addToAllowlist', [B]) },
+            [HASH2]: { to: ADDR, input: enc('addToAllowlist', [B]) },
+          },
+          values: { [`${ADDR}|getAllowlist|[]`]: [A, B] },
+        }),
+      })
+    );
+    expect(orphans).toHaveLength(2);
+    const out = linkResults([member('invoke.addA', 'auto:contains', A, [A, B]), ...orphans]);
+    expect(out.find((r) => r.kind === 'enumeration')?.explainedBy).toBe('invoke.oldAdd');
+  });
+
+  it('gives each list its own enumeration row with increasing order', () => {
+    const second = slotOf('getAllowlist', NESTED);
+    const out = linkResults([
+      member('invoke.addA', 'auto:contains', A, [A]),
+      member('invoke.addB', 'auto:contains', B, [B], { slot: second }),
+    ]);
+    const enums = out.filter((r) => r.kind === 'enumeration');
+    expect(enums.map((r) => r.slot?.address)).toEqual([ADDR, NESTED]);
+    expect(enums[1].order).toBe(enums[0].order + 1);
+    expect(enums[0].order).toBeGreaterThan(out[1].order);
+  });
+
+  it('treats a chain list that is not an array as empty', () => {
+    const row = member('invoke.addA', 'auto:contains', A, [A]);
+    row.check = { rule: 'auto:contains', getter: 'getAllowlist', expected: A, actual: 'not a list' };
+    const e = linkResults([row])[1];
+    expect(e.status).toBe('in-sync');
+    expect(e.check?.actual).toEqual([]);
+  });
+
+  it('shows a non-string member as JSON in the detail', () => {
+    const row = declared('invoke.addPair', {
+      slot: slotOf('getPairs'),
+      check: {
+        rule: 'auto:contains',
+        getter: 'getPairs',
+        expected: ['1', '2'],
+        actual: [
+          ['1', '2'],
+          ['3', '4'],
+        ],
+      },
+    });
+    const e = linkResults([row])[1];
+    expect(e.status).toBe('drift');
+    expect(e.detail).toBe('undeclared member(s): ["3","4"]');
+  });
 });
