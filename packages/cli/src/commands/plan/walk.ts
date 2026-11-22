@@ -233,7 +233,7 @@ async function walkPackage(
     let contract: { address: viem.Address; abi: viem.Abi };
     if (viem.isAddress(t)) {
       if (!customAbi) return { ...base, status: 'error', detail: `target ${t}: an address target needs abi` };
-      contract = { address: t, abi: customAbi };
+      contract = { address: viem.getAddress(t), abi: customAbi };
     } else {
       const found = getContractFromPath(ctx, t);
       if (!found) return { ...base, status: 'error', detail: `target ${t} not found` };

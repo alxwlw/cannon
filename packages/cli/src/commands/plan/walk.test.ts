@@ -268,14 +268,11 @@ describe('walkRecord', () => {
     const rows = await walkRecord(record, 'root', await opts());
     const orphans = byStep(rows, 'invoke.setDelay');
     expect(orphans).toHaveLength(1);
-    // checkOrphan takes the address from the transaction, which the node returns in lower case
+    // checkOrphan takes the address from the transaction, which the node returns in lower case; the row is checksummed
     const { target, slot, ...rest } = orphans[0];
-    expect([target?.name, viem.getAddress(target?.address ?? '0x')]).toEqual(['fixture', main.addresses.fixture]);
-    expect([viem.getAddress(slot?.address ?? '0x'), slot?.getter, slot?.keys]).toEqual([
-      main.addresses.fixture,
-      'getDelay',
-      '[]',
-    ]);
+    expect(main.addresses.fixture).not.toBe(main.addresses.fixture.toLowerCase());
+    expect(target).toEqual({ name: 'fixture', address: main.addresses.fixture });
+    expect(slot).toEqual({ address: main.addresses.fixture, getter: 'getDelay', keys: '[]' });
     expect(rest).toEqual({
       pkg: 'root',
       step: 'invoke.setDelay',
@@ -303,6 +300,30 @@ describe('walkRecord', () => {
     });
     expect(byStep(await walkRecord(unrenderable, 'root', await opts()), 'invoke.setValue')).toEqual([
       { pkg: 'root', step: 'invoke.setValue', kind: 'invoke', status: 'unchecked', order: 5, detail: NOT_EXECUTED },
+    ]);
+  });
+
+  it('an address target spelled in lower case is reported checksummed, in target and slot', async () => {
+    const lower = main.addresses.fixture.toLowerCase();
+    expect(lower).not.toBe(main.addresses.fixture);
+    const record = edited((r) =>
+      Object.assign((r.def.invoke as Record<string, Record<string, unknown>>).setValue, {
+        target: [lower],
+        abi: JSON.stringify(VALUE_ABI),
+      })
+    );
+    expect(byStep(await walkRecord(record, 'root', await opts()), 'invoke.setValue')).toEqual([
+      {
+        pkg: 'root',
+        step: 'invoke.setValue',
+        kind: 'invoke',
+        status: 'in-sync',
+        order: 1,
+        target: { name: lower, address: main.addresses.fixture },
+        call: { func: 'setValue', args: ['42'] },
+        check: { rule: 'auto:equal/1', getter: 'getValue', expected: ['42'], actual: ['42'] },
+        slot: { address: main.addresses.fixture, getter: 'getValue', keys: '[]' },
+      },
     ]);
   });
 

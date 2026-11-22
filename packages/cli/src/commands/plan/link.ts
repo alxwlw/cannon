@@ -16,20 +16,20 @@ type ContractsOf = {
 
 const sameAddress = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-function search(node: ContractsOf, address: viem.Address): Found | null {
+function collect(node: ContractsOf, address: viem.Address, out: Found[]): Found[] {
   for (const [name, c] of Object.entries(node.contracts || {})) {
-    if (sameAddress(c.address, address)) return { name, abi: c.abi };
+    if (sameAddress(c.address, address)) out.push({ name, abi: c.abi });
   }
-  for (const child of Object.values(node.imports || {})) {
-    const found = search(child, address);
-    if (found) return found;
-  }
-  return null;
+  for (const child of Object.values(node.imports || {})) collect(child, address, out);
+  return out;
 }
 
-/** Looks the address up in the package's own contracts first, then in its imports, recursively. */
-export function findContractByAddress(ctx: ChainBuilderContext, address: viem.Address): Found | null {
-  return search(ctx as ContractsOf, address);
+/**
+ * Every contract the package recorded at the address: its own first, then its imports', recursively. One address
+ * may carry several: a proxy is recorded bare and again under the ABI of the implementation it routes to.
+ */
+export function findContractsByAddress(ctx: ChainBuilderContext, address: viem.Address): Found[] {
+  return collect(ctx as ContractsOf, address, []);
 }
 
 /** Decoded arguments in report form: bigints become decimal strings. */
@@ -82,18 +82,26 @@ export async function checkOrphan(a: {
       row({ orphan: { effect: 'error', conflicting: false }, detail, ...over });
     try {
       const tx = await a.reader.getTransaction(txn.hash as viem.Hex);
-      const target = tx.to ? findContractByAddress(a.ctx, tx.to) : null;
-      if (!tx.to || !target) return fail(`target ${tx.to ?? '(contract creation)'} is not a contract of this package`);
+      // a node may return `to` in lower case; the report carries checksummed addresses
+      const to = tx.to ? viem.getAddress(tx.to) : null;
+      const candidates = to ? findContractsByAddress(a.ctx, to) : [];
+      if (!to || !candidates.length) {
+        return fail(`target ${tx.to ?? '(contract creation)'} is not a contract of this package`);
+      }
 
+      // the first contract at that address whose ABI has the called function
       const selector = tx.input.slice(0, 10).toLowerCase();
-      const setter = target.abi.find(
-        (f): f is viem.AbiFunction => f.type === 'function' && viem.toFunctionSelector(f) === selector
-      );
-      if (!setter) return fail(`cannot decode input ${selector} against ${target.name}`);
+      const hasSelector = (f: viem.Abi[number]): f is viem.AbiFunction =>
+        f.type === 'function' && viem.toFunctionSelector(f) === selector;
+      const target = candidates.find((c) => c.abi.some(hasSelector));
+      const setter = target?.abi.find(hasSelector);
+      if (!target || !setter) {
+        return fail(`cannot decode input ${selector} against ${candidates.map((c) => c.name).join(', ')}`);
+      }
       const decoded = viem.decodeFunctionData({ abi: [setter], data: tx.input });
       const args = [...(decoded.args || [])];
       const withTarget = {
-        target: { name: target.name, address: tx.to },
+        target: { name: target.name, address: to },
         call: { func: setter.name, args: plain(args) as unknown[] },
       };
 
@@ -101,7 +109,7 @@ export async function checkOrphan(a: {
         step: a.step,
         setter,
         abi: target.abi,
-        address: tx.to,
+        address: to,
         args,
         events: txn.events || {},
         reader: a.reader,

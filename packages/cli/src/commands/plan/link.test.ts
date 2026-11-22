@@ -1,13 +1,14 @@
 import * as viem from 'viem';
 import { ChainArtifacts, ChainBuilderContext } from '@usecannon/builder';
 import fixture from './__fixtures__/PlanFixture.json';
-import { checkOrphan, findContractByAddress, linkResults } from './link';
+import { checkOrphan, findContractsByAddress, linkResults } from './link';
 import { ChainReader } from './read';
 import { HintsModule } from './hints';
 import { StepResult } from './types';
 
 const abi = fixture.abi as viem.Abi;
-const ADDR = '0x00000000000000000000000000000000000000aa' as viem.Address;
+// checksummed: the report carries EIP-55 addresses; its lower-case form differs (…AA vs …aa)
+const ADDR = '0x00000000000000000000000000000000000000AA' as viem.Address;
 const NESTED = '0x00000000000000000000000000000000000000bb' as viem.Address;
 const A = '0x1111111111111111111111111111111111111111' as viem.Address;
 const B = '0x2222222222222222222222222222222222222222' as viem.Address;
@@ -67,18 +68,26 @@ const base = (over: Partial<Parameters<typeof checkOrphan>[0]>) => ({
   ...over,
 });
 
-describe('findContractByAddress', () => {
+describe('findContractsByAddress', () => {
   it('finds a top-level contract case-insensitively', () => {
-    const f = findContractByAddress(ctx, ADDR.toUpperCase().replace('0X', '0x') as viem.Address);
-    expect(f).toEqual({ name: 'Fixture', abi });
+    const f = findContractsByAddress(ctx, ADDR.toLowerCase() as viem.Address);
+    expect(f).toEqual([{ name: 'Fixture', abi }]);
   });
 
   it('descends into nested imports', () => {
-    expect(findContractByAddress(ctx, NESTED)).toEqual({ name: 'Nested', abi });
+    expect(findContractsByAddress(ctx, NESTED)).toEqual([{ name: 'Nested', abi }]);
   });
 
-  it('returns null for an unknown address', () => {
-    expect(findContractByAddress(ctx, A)).toBeNull();
+  it('returns nothing for an unknown address', () => {
+    expect(findContractsByAddress(ctx, A)).toEqual([]);
+  });
+
+  it('returns every contract at the address: the own ones in order, then those of imports', () => {
+    const shared = {
+      contracts: { First: { address: A, abi: [] }, Other: { address: B, abi }, Second: { address: A, abi } },
+      imports: { sub: { contracts: { Third: { address: A, abi: [] } } } },
+    } as unknown as ChainBuilderContext;
+    expect(findContractsByAddress(shared, A).map((f) => f.name)).toEqual(['First', 'Second', 'Third']);
   });
 });
 
@@ -102,6 +111,46 @@ describe('checkOrphan', () => {
       slot: { address: ADDR, getter: 'getDelay', keys: '[]' },
       check: { rule: 'auto:equal/1', getter: 'getDelay', expected: ['5'], actual: ['5'] },
     });
+  });
+
+  it('reports the target and slot address checksummed when the node returns it in lower case', async () => {
+    const rows = await checkOrphan(
+      base({
+        reader: reader({
+          txns: { [HASH1]: { to: ADDR.toLowerCase() as viem.Address, input: enc('setDelay', [5n]) } },
+          values: delay5,
+        }),
+      })
+    );
+    expect(rows[0].target).toEqual({ name: 'Fixture', address: '0x00000000000000000000000000000000000000AA' });
+    expect(rows[0].slot).toEqual({ address: '0x00000000000000000000000000000000000000AA', getter: 'getDelay', keys: '[]' });
+    expect(rows[0].orphan).toEqual({ effect: 'in-sync', conflicting: false });
+  });
+
+  it('decodes against the contract at that address whose ABI has the function (a proxy recorded twice)', async () => {
+    // a proxy is recorded bare and, through a factory abiOf, again under the ABI of what it routes to
+    const fns = (names: string[]) => abi.filter((f) => f.type === 'function' && names.includes(f.name));
+    const proxied = {
+      contracts: {
+        InitialProxy: { address: ADDR, abi: fns(['nominateNewOwner', 'owner']) },
+        Proxy: { address: ADDR, abi: fns(['nominateNewOwner', 'owner', 'setDelay', 'getDelay']) },
+      },
+    } as unknown as ChainBuilderContext;
+    const rows = await checkOrphan(
+      base({
+        ctx: proxied,
+        reader: reader({ txns: { [HASH1]: { to: ADDR, input: enc('setDelay', [5n]) } }, values: delay5 }),
+      })
+    );
+    expect(rows[0]).toMatchObject({
+      target: { name: 'Proxy', address: ADDR },
+      orphan: { effect: 'in-sync', conflicting: false },
+      check: { rule: 'auto:equal/1', getter: 'getDelay', expected: ['5'], actual: ['5'] },
+    });
+    const none = await checkOrphan(
+      base({ ctx: proxied, reader: reader({ txns: { [HASH1]: { to: ADDR, input: enc('setValue', [5n]) } } }) })
+    );
+    expect(none[0].detail).toBe(`cannot decode input ${enc('setValue', [5n]).slice(0, 10)} against InitialProxy, Proxy`);
   });
 
   it('marks an orphan whose value was overwritten as drift', async () => {
