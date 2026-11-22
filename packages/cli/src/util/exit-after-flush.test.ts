@@ -1,3 +1,4 @@
+import { exitAfterFlush } from './exit-after-flush';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 
@@ -32,5 +33,37 @@ describe('exitAfterFlush', () => {
     const { bytes, code } = await runChild('flush');
     expect(bytes).toBe(TOTAL);
     expect(code).toBe(7);
+  });
+});
+
+describe('exitAfterFlush exit code', () => {
+  // the flush itself is covered by the spawned tests above; here the streams acknowledge at once
+  const run = async (code?: number) => {
+    const ack = (_chunk: unknown, cb?: () => void) => {
+      cb?.();
+      return true;
+    };
+    jest.spyOn(process.stdout, 'write').mockImplementation(ack as never);
+    jest.spyOn(process.stderr, 'write').mockImplementation(ack as never);
+    const before = process.exitCode;
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    try {
+      exitAfterFlush(code);
+      expect(exit).toHaveBeenCalledTimes(1);
+      return exit.mock.calls[0][0];
+    } finally {
+      process.exitCode = before;
+      jest.restoreAllMocks();
+    }
+  };
+
+  it('uses process.exitCode when no code is given', async () => {
+    process.exitCode = 2;
+    expect(await run()).toBe(2);
+  });
+
+  it('an explicit code wins over process.exitCode', async () => {
+    process.exitCode = 2;
+    expect(await run(7)).toBe(7);
   });
 });

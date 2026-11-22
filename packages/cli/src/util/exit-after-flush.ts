@@ -5,13 +5,14 @@
  * asynchronously, so output still queued in user space (e.g. the JSON `inspect --out deploy-json`
  * emits in small chunks) is lost. An empty write is queued behind every earlier one, so its callback
  * fires only after they have been flushed. The exit itself stays forced: open handles (nodes, sockets,
- * timers) must not keep the CLI alive.
+ * timers) must not keep the CLI alive. Without an explicit `code` the exit uses `process.exitCode`: an action that
+ * sets it (`cannon plan` exits 2 on drift) would otherwise be reset, since `process.exit(undefined)` clears it.
  */
 export function exitAfterFlush(code?: Parameters<typeof process.exit>[0]): void {
   const streams = [process.stdout, process.stderr];
   let pending = streams.length;
   const done = () => {
-    if (--pending === 0) process.exit(code);
+    if (--pending === 0) process.exit(code ?? process.exitCode);
   };
   for (const stream of streams) {
     if (stream.writable) {

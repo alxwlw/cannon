@@ -36,7 +36,10 @@ export interface LoadedRecord {
 
 export interface PlanDeps {
   loadRecord?: (o: PlanOptions) => Promise<LoadedRecord>;
-  /** Where blobs are read from: the default record loader and the pending runtime both use it. */
+  /**
+   * Where nested blobs are read from: the default record loader's `readBlob` and the pending runtime use it. The
+   * top-level lookup (ipfs refs, chain id resolution) always goes through `getPackageInfo`, with its own registry.
+   */
   storage?: { registry: CannonRegistry; loaders: { [scheme: string]: CannonLoader } };
 }
 
