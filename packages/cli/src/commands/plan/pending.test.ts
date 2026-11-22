@@ -167,14 +167,37 @@ describe('plan pending changes', () => {
     const withGhost = (depends: string[]) => {
       const def = editedDef((d) => (d.deploy.ghost = { artifact: 'Ghost', args: [], depends }));
       const record = _.cloneDeep(main.record);
-      record.def = def;
+      // a copy: a later edit of `def` is the cannonfile's alone
+      record.def = _.cloneDeep(def);
       record.state['deploy.ghost'] = { artifacts: {}, hash: 'recorded', version: 3 } as any;
       return { def, record };
     };
 
-    it('fails the run when nothing upstream explains it: an unknown state is not a pending change', async () => {
+    it('fails the run when its config is unchanged and nothing upstream explains it', async () => {
       const { def, record } = withGhost([]);
       await expect(pending(record, mainStorage, def)).rejects.toThrow(/^cannot compute the state of deploy\.ghost: /);
+    });
+
+    it('a depends-only edit is still the same config: with nothing upstream the failure is rethrown', async () => {
+      const { def, record } = withGhost([]);
+      def.deploy!.ghost.depends = ['invoke.setValue'];
+      await expect(pending(record, mainStorage, def)).rejects.toThrow(/^cannot compute the state of deploy\.ghost: /);
+    });
+
+    it('a deploy pointed at an artifact the record lacks (an upgrade) is changed, its dependents may change', async () => {
+      const def = editedDef((d) => (d.deploy.fixture.artifact = 'PlanFixtureV2'));
+      expect(await pending(main.record, mainStorage, def)).toEqual([
+        { step: 'deploy.fixture', change: 'changed' },
+        { step: 'invoke.allowA', change: 'may-change' },
+        { step: 'invoke.setValue', change: 'may-change' },
+      ]);
+    });
+
+    it('a recorded step the record has no config for is changed', async () => {
+      const { def } = withGhost([]);
+      const record = _.cloneDeep(main.record);
+      record.state['deploy.ghost'] = { artifacts: {}, hash: 'recorded', version: 3 } as any;
+      expect(await pending(record, mainStorage, def)).toEqual([{ step: 'deploy.ghost', change: 'changed' }]);
     });
 
     it('may change when a dependency is added or changed', async () => {
@@ -245,18 +268,20 @@ describe('plan pending changes', () => {
       });
     });
 
-    it('a router whose new module is an added step may change, never a throw', async () => {
-      // the module is not in the record, so the router's state (the module ABIs) cannot be computed against it
+    it('a router given a module the cannonfile adds is changed, never a throw', async () => {
+      // the module is not in the record, so the router's state (the module ABIs) cannot be computed against it;
+      // its config lists one more contract than the recorded one
+      const recorded = editedDef((d) => (d.router = { r: { contracts: ['fixture'] } }));
       const def = editedDef((d) => {
         d.deploy.mod = { artifact: 'PlanFixture', args: [OWNER] };
-        d.router = { r: { contracts: ['fixture', 'mod'] } };
-      });
+        d.router.r.contracts.push('mod');
+      }, recorded);
       const record = _.cloneDeep(main.record);
-      record.def = def;
+      record.def = recorded;
       record.state['router.r'] = { artifacts: {}, hash: 'recorded', version: 3 } as any;
       expect(await pending(record, mainStorage, def)).toEqual([
         { step: 'deploy.mod', change: 'added' },
-        { step: 'router.r', change: 'may-change' },
+        { step: 'router.r', change: 'changed' },
       ]);
     });
   });

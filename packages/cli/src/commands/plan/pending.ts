@@ -51,8 +51,10 @@ const OUTPUT_KINDS = new Set(['deploy', 'router', 'clone']);
  * What the next build of `gitDef` would add, change or remove against the recorded deployment. It compares the
  * builder's own step hashes with the recorded ones, the way `build()` decides to re-run a step, not the raw config
  * text: a `depends` edit is not a change. Nothing is compiled, so a changed contract source is not detected.
- * A step that cannot be rendered is `changed` (`may-change` below an added or changed dependency); a step whose state
- * cannot be computed (a registry lookup that failed) rejects, unless such a dependency explains it.
+ * A step that cannot be rendered is `changed` (`may-change` below an added or changed dependency). A step whose state
+ * cannot be computed is judged by its config: configured otherwise than recorded is `changed`, the same config below
+ * such a dependency is `may-change`; with the same config and nothing upstream the failure is its own (a registry
+ * lookup that failed) and computePending rejects.
  */
 export async function computePending(
   record: DeploymentInfo,
@@ -82,6 +84,18 @@ export async function computePending(
       return (change === 'added' || change === 'changed') && (!only || only(dep));
     });
 
+  /** Whether the cannonfile configures `n` as the record did: both rendered in `ctx`, `depends` left out. */
+  const sameConfig = (n: string, config: unknown, ctx: ChainBuilderContext) => {
+    let recorded: unknown;
+    try {
+      recorded = recordDef.getConfig(n, ctx);
+    } catch {
+      // the cannonfile's config renders in this context and the record's does not (or it has none): not the same
+      return false;
+    }
+    return _.isEqual(_.omit(config as object, 'depends'), _.omit(recorded as object, 'depends'));
+  };
+
   type Change = 'changed' | 'may-change' | null;
   /** The change of a step present in both, or null when a build would leave it as recorded. */
   const judge = async (n: string, ctx: ChainBuilderContext, hash: string | null | undefined): Promise<Change> => {
@@ -99,9 +113,11 @@ export async function computePending(
     try {
       cur = await gitDef.getState(n, runtime, ctx, false);
     } catch (err) {
-      // an added or changed dependency explains it (its outputs are not in the record), and is pending itself
+      // the state needs what the record lacks (the artifact of an upgrade, a module not deployed yet): the config tells
+      if (!sameConfig(n, config, ctx)) return 'changed';
+      // the same config below an added or changed dependency, whose outputs the record does not have
       if (upstream(n)) return 'may-change';
-      // anything else (a registry lookup that failed, say) is not a change of the cannonfile: the run fails
+      // the same config and nothing upstream: a failure of its own (a registry lookup, say), not a change; the run fails
       throw new Error(`cannot compute the state of ${n}: ${shortError(err)}`);
     }
     return changedIf(hash !== 'SKIP' && !!cur && !cur.includes(hash || ''));

@@ -106,6 +106,11 @@ Exit codes:
 - `2` — a drift, an orphan whose effect explains a declared step's drift, or a step the cannonfile adds, changes or removes
 - `1` — the run failed: bad options, an RPC on another chain, a record, registry or block that cannot be read
 
+With `--cannonfile`, a step whose state cannot be computed (an artifact the record lacks, a module not deployed yet)
+is judged by its config: configured otherwise than recorded (`depends` aside) it is `changed`, the same config below
+an added or changed step is `may-change`, and the same config with nothing upstream (a registry lookup that failed)
+fails the run.
+
 What is checked:
 - each `invoke` step: the getter derived from the setter by name and types (`setX(v)` → `getX()` or `x()`,
   `addToX(m)` → `m` in `getX()`), or a hint for that setter; a value the contract changed and announced in the last
